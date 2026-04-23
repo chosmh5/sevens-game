@@ -99,7 +99,7 @@ def call_ollama(speaker_name: str, history: list, user_message: Optional[str] = 
             "stream": False,
             "options": {"temperature": 0.8, "num_predict": 30},
             "messages": messages
-        }, timeout=30)
+        }, timeout=120)
         reply = res.json().get("message", {}).get("content", "").strip()
 
         # 이름 접두사 제거
@@ -223,3 +223,19 @@ def get_characters():
 def clear_conversation():
     conversation_history.clear()
     return {"message": "초기화 완료"}
+
+@app.get("/character/line")
+def get_character_line():
+    import random
+    char_name = active_characters[0]
+    situations = [
+        "지금 혼자 있는데, 혼잣말로 한마디 해봐.",
+        "누군가 갑자기 나타났을 때 반응하듯 한마디 해.",
+        "지루한 순간에 중얼거리는 말 한마디를 해.",
+        "승부가 기다려지는 이 순간, 한마디 해.",
+        "플레이어가 보고 있다는 걸 알면서도 모르는 척 한마디 해.",
+        "혼자만의 시간에 떠오르는 생각 한마디를 해.",
+    ]
+    situation = random.choice(situations)
+    line = call_ollama(char_name, [], situation)
+    return {"speaker": char_name, "line": line}
