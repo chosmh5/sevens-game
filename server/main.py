@@ -38,6 +38,27 @@ DEFAULT_CHARACTERS = {
             "나쁜 예시(절대 금지): '도와드릴게요!', '물론이죠!', '감사합니다!', '~습니다', '~하겠습니다'"
         ),
     },
+    "류": {
+        "name": "류",
+        "personality": (
+            "말이 적고 냉정하며 관찰력이 뛰어난 AI 캐릭터다. "
+            "감정을 거의 드러내지 않지만 핵심을 찌르는 말을 한다. "
+            "세비-호의 오만함을 꿰뚫어 보지만 굳이 반박하지 않는다. "
+            "승부보다는 상황 전체를 읽는 것에 더 관심 있다. "
+            "드물게 말할 때 그 말이 오래 기억에 남는다."
+        ),
+        "speech_style": (
+            "한국어 구어체 존댓말로 짧고 건조하게 말한다. "
+            "모든 문장은 반드시 ~요로 끝낸다. 반말 어미 절대 금지. "
+            "감탄사나 장식적 표현 없이 핵심만 말한다. "
+            "좋은 예시: "
+            "'보이는 것만 믿으면 안 되죠.', "
+            "'그럴 줄 알았어요.', "
+            "'이미 끝난 얘기예요.', "
+            "'틀렸어요.' "
+            "나쁜 예시(절대 금지): '대단해요!', '정말요?', '도와드릴게요!', '~습니다', '~하겠습니다'"
+        ),
+    },
 }
 
 # ========================
@@ -221,13 +242,36 @@ def get_characters():
 
 @app.post("/conversation/clear")
 def clear_conversation():
+    global current_speaker_index
     conversation_history.clear()
+    current_speaker_index = 0
     return {"message": "초기화 완료"}
 
+@app.post("/conversation/next")
+def conversation_next():
+    global current_speaker_index
+    if not active_characters:
+        return {"error": "활성 캐릭터 없음"}
+
+    speaker = active_characters[current_speaker_index % len(active_characters)]
+    reply = call_ollama(speaker, conversation_history)
+
+    conversation_history.append({
+        "speaker": speaker,
+        "message": reply,
+        "timestamp": time.time()
+    })
+
+    if len(conversation_history) > 100:
+        conversation_history.pop(0)
+
+    current_speaker_index += 1
+    return {"speaker": speaker, "line": reply}
+
 @app.get("/character/line")
-def get_character_line():
+def get_character_line(name: Optional[str] = None):
     import random
-    char_name = active_characters[0]
+    char_name = name if name in DEFAULT_CHARACTERS else active_characters[0]
     situations = [
         "지금 혼자 있는데, 혼잣말로 한마디 해봐.",
         "누군가 갑자기 나타났을 때 반응하듯 한마디 해.",

@@ -3,14 +3,12 @@ using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
 
-/// <summary>
-/// 일정 간격으로 서버에서 대사를 받아와 말풍선으로 표시합니다.
-/// speechBubble: World Space Canvas 하위 Panel
-/// dialogueText: TextMeshPro 컴포넌트
-/// </summary>
 public class CharacterDialogue : MonoBehaviour
 {
-    [Header("UI")]
+    [Header("캐릭터")]
+    [SerializeField] public string characterName = "세비-호";
+
+    [Header("말풍선 (비워두면 자동 생성)")]
     [SerializeField] private GameObject      speechBubble;
     [SerializeField] private TextMeshProUGUI dialogueText;
 
@@ -18,20 +16,83 @@ public class CharacterDialogue : MonoBehaviour
     [SerializeField] private float minInterval     = 6f;
     [SerializeField] private float maxInterval     = 14f;
     [SerializeField] private float displayDuration = 4f;
-    [SerializeField] private float startDelay      = 2f;  // 씬 시작 후 첫 대사까지 대기
+    [SerializeField] private float startDelay      = 2f;
 
     [Header("페이드")]
     [SerializeField] private float fadeDuration = 0.3f;
 
-    private CanvasGroup bubbleGroup;
+    public bool InConversation { get; set; }
+
+    private CanvasGroup  bubbleGroup;
+    private Transform    bubbleCanvas;
 
     void Start()
     {
+        if (speechBubble == null)
+            CreateSpeechBubble();
+
         bubbleGroup = speechBubble.GetComponent<CanvasGroup>();
         if (bubbleGroup == null) bubbleGroup = speechBubble.AddComponent<CanvasGroup>();
 
         speechBubble.SetActive(false);
+
+        ConversationManager.Instance?.Register(this);
         StartCoroutine(DialogueLoop());
+    }
+
+    void LateUpdate()
+    {
+        if (bubbleCanvas != null && Camera.main != null)
+        {
+            bubbleCanvas.LookAt(
+                bubbleCanvas.position + Camera.main.transform.rotation * Vector3.forward,
+                Camera.main.transform.rotation * Vector3.up);
+        }
+    }
+
+    void CreateSpeechBubble()
+    {
+        var canvasGO = new GameObject("SpeechBubble");
+        canvasGO.transform.SetParent(transform, false);
+        canvasGO.transform.localPosition = new Vector3(0, 2.2f, 0);
+
+        var canvas = canvasGO.AddComponent<Canvas>();
+        canvas.renderMode = RenderMode.WorldSpace;
+
+        var rt = canvasGO.GetComponent<RectTransform>();
+        rt.sizeDelta  = new Vector2(200, 60);
+        rt.localScale = Vector3.one * 0.012f;
+
+        canvasGO.AddComponent<CanvasScaler>();
+        bubbleCanvas = canvasGO.transform;
+
+        // 배경 패널
+        var panelGO = new GameObject("Panel");
+        panelGO.transform.SetParent(canvasGO.transform, false);
+        var panelRT = panelGO.AddComponent<RectTransform>();
+        panelRT.anchorMin = Vector2.zero;
+        panelRT.anchorMax = Vector2.one;
+        panelRT.offsetMin = Vector2.zero;
+        panelRT.offsetMax = Vector2.zero;
+
+        var img = panelGO.AddComponent<Image>();
+        img.color = new Color(0f, 0f, 0f, 0.72f);
+
+        speechBubble = panelGO;
+
+        // 텍스트
+        var textGO = new GameObject("Text");
+        textGO.transform.SetParent(panelGO.transform, false);
+        var textRT = textGO.AddComponent<RectTransform>();
+        textRT.anchorMin = Vector2.zero;
+        textRT.anchorMax = Vector2.one;
+        textRT.offsetMin = new Vector2(8, 4);
+        textRT.offsetMax = new Vector2(-8, -4);
+
+        dialogueText = textGO.AddComponent<TextMeshProUGUI>();
+        dialogueText.fontSize  = 14;
+        dialogueText.alignment = TextAlignmentOptions.Center;
+        dialogueText.color     = Color.white;
     }
 
     IEnumerator DialogueLoop()
@@ -42,15 +103,23 @@ public class CharacterDialogue : MonoBehaviour
         {
             yield return new WaitForSeconds(Random.Range(minInterval, maxInterval));
 
+            if (InConversation) continue;
+
             string line = null;
             yield return ServerClient.Instance.GetCharacterLine(
+                characterName,
                 onSuccess: l => line = l,
                 onFail:    () => line = ""
             );
 
-            if (!string.IsNullOrEmpty(line))
+            if (!string.IsNullOrEmpty(line) && !InConversation)
                 yield return ShowDialogue(line);
         }
+    }
+
+    public IEnumerator SayLine(string line)
+    {
+        yield return ShowDialogue(line);
     }
 
     IEnumerator ShowDialogue(string line)
@@ -58,12 +127,8 @@ public class CharacterDialogue : MonoBehaviour
         dialogueText.text = line;
         speechBubble.SetActive(true);
 
-        // 페이드 인
         yield return Fade(0f, 1f);
-
         yield return new WaitForSeconds(displayDuration);
-
-        // 페이드 아웃
         yield return Fade(1f, 0f);
 
         speechBubble.SetActive(false);

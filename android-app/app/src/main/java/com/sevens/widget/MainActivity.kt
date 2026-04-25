@@ -67,7 +67,19 @@ class MainActivity : ComponentActivity() {
                         }
 
                         Button(
-                            onClick = { /* TODO: 게임 시작 */ },
+                            onClick = {
+                                val intent = context.packageManager
+                                    .getLaunchIntentForPackage("com.sevens.game")
+                                if (intent != null) {
+                                    context.startActivity(intent)
+                                } else {
+                                    android.widget.Toast.makeText(
+                                        context,
+                                        "게임 앱이 설치되지 않았습니다.",
+                                        android.widget.Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            },
                             colors = ButtonDefaults.buttonColors(containerColor = ACCENT_MAIN),
                             shape = RoundedCornerShape(16.dp),
                             modifier = Modifier

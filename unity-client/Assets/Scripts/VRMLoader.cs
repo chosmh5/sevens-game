@@ -42,7 +42,7 @@ public class VRMLoader : MonoBehaviour
         var vrmData = new VRMData(data);
 
         using var context  = new VRMImporterContext(vrmData);
-        var       instance = await context.LoadAsync(new ImmediateCaller());
+        var       instance = await context.LoadAsync(new RuntimeOnlyAwaitCaller());
 
         instance.EnableUpdateWhenOffscreen();
         instance.ShowMeshes();

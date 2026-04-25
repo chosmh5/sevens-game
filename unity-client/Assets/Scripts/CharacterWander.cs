@@ -22,15 +22,33 @@ public class CharacterWander : MonoBehaviour
 
     void Start()
     {
-        agent           = GetComponent<NavMeshAgent>();
-        animator        = GetComponent<Animator>();
+        agent    = GetComponent<NavMeshAgent>();
+        animator = GetComponent<Animator>();
+        if (animator != null && animator.runtimeAnimatorController == null)
+            animator = null;
         agent.speed     = moveSpeed;
         agent.stoppingDistance = 0.3f;
         MoveToRandom();
     }
 
+    public void Pause()
+    {
+        agent.ResetPath();
+        agent.isStopped = true;
+        animator?.SetBool(IsWalkingHash, false);
+    }
+
+    public void Resume()
+    {
+        agent.isStopped = false;
+        isWaiting = false;
+        MoveToRandom();
+    }
+
     void Update()
     {
+        if (agent.isStopped) return;
+
         bool moving = !agent.pathPending && agent.velocity.sqrMagnitude > 0.01f;
         animator?.SetBool(IsWalkingHash, moving);
 

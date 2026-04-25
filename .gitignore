@@ -1,2 +1,27 @@
+# Python
 __pycache__/
 *.pyc
+
+# Unity generated
+unity-client/Library/
+unity-client/Temp/
+unity-client/Logs/
+unity-client/obj/
+unity-client/Build/
+unity-client/Builds/
+unity-client/UserSettings/
+unity-client/UpgradeLog.htm
+
+# Unity IDE files
+unity-client/.vs/
+unity-client/.vsconfig
+unity-client/*.csproj
+unity-client/*.sln
+
+# Android
+*.apk
+*.aab
+android-app/.gradle/
+android-app/app/build/
+android-app/build/
+android-app/local.properties
