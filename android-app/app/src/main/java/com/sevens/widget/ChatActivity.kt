@@ -61,7 +61,7 @@ fun ChatScreen() {
                 .padding(16.dp),
             contentAlignment = Alignment.Center
         ) {
-            Text("세비-호", color = ACCENT, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Text("세비-호 [NEW]", color = ACCENT, fontSize = 18.sp, fontWeight = FontWeight.Bold)
             TextButton(
                 onClick = {
                     scope.launch {
@@ -206,6 +206,6 @@ private suspend fun sendMessage(text: String): Message = withContext(Dispatchers
         val obj = JSONObject(json)
         Message(obj.getString("speaker"), obj.getString("reply"))
     } catch (e: Exception) {
-        Message("오류", "서버에 연결할 수 없습니다.")
+        Message("DEBUG_v2", "${e.javaClass.simpleName}: ${e.message}")
     }
 }

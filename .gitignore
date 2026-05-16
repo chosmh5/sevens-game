@@ -18,6 +18,15 @@ unity-client/.vsconfig
 unity-client/*.csproj
 unity-client/*.sln
 
+# Windows Build output (root level)
+D3D12/
+MonoBleedingEdge/
+SevensGame.exe
+SevensGame_Data/
+SevensGame_BurstDebugInformation_DoNotShip/
+UnityCrashHandler64.exe
+UnityPlayer.dll
+
 # Android
 *.apk
 *.aab

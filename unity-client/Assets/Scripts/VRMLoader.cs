@@ -59,6 +59,10 @@ public class VRMLoader : MonoBehaviour
             // VRM 메시만 root에 있음
         }
 
+        // ── URP 호환성 픽스: VRM 의 MToon 셰이더는 Built-in 전용이라 URP 환경에서
+        //    캐릭터가 반투명하게 보이는 버그를 일으킨다. 로드 직후 URP/Lit 으로 교체한다.
+        MToonURPFixer.FixHierarchy(root);
+
         LoadedCharacter = root;
         Debug.Log($"[VRMLoader] {vrmFileName} 로드 완료");
     }
