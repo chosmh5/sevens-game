@@ -13,7 +13,8 @@ using UnityEngine.UI;
 ///   * 0장 낸 상태에서 낼 카드 없음 = "패스" 버튼 활성
 ///   * 1~2장 낸 상태 = "턴 종료" 버튼 활성 (전략적으로 더 안 내고 끝낼 수 있음)
 ///   * 3장 도달 = 자동 턴 종료
-/// - AI는 현재 턴당 1장만 내는 단순 버전 (RandomAiStrategy).
+/// - AI도 사람과 동일 규칙: 낼 카드가 있으면 첫 장 의무 제출, 2·3번째 장은 전략에 따라 선택.
+///   난이도(Easy/Normal/Hard)에 따라 IAiStrategy 구현이 교체된다.
 /// - 손패 0장 도달 시 승리, GameOver 상태로 전환.
 /// </summary>
 public class CardGameManager : MonoBehaviour
@@ -34,8 +35,14 @@ public class CardGameManager : MonoBehaviour
     [SerializeField] private int    handSize        = 12;
     [SerializeField] private int    maxPlaysPerTurn = 3;  // 사양: 턴당 최대 3장
     [SerializeField] private float  aiThinkDelay    = 0.8f;
+    [SerializeField] private float  aiPlayInterval  = 0.35f; // 한 턴 내 카드 사이 연출 딜레이
     [SerializeField] private int    rngSeed         = 0; // 0 = 시스템 랜덤
     [SerializeField] private bool   runOnStart      = true;
+
+    [Header("AI")]
+    [Tooltip("Inspector 기본 난이도. useLobbyDifficulty=true면 로비에서 선택한 값을 우선 사용.")]
+    [SerializeField] private AiDifficulty aiDifficulty       = AiDifficulty.Normal;
+    [SerializeField] private bool         useLobbyDifficulty = true;
     [SerializeField] private string playerName      = "플레이어";
     [SerializeField] private string[] aiNames       = { "상대 1", "상대 2", "상대 3" };
 
@@ -54,6 +61,7 @@ public class CardGameManager : MonoBehaviour
     private IAiStrategy _ai;
     private System.Random _rng;
     private OpponentProfile[] _aiProfiles; // index 0..2 → AI player 1..3
+    private readonly AiContext _aiCtx = new AiContext(); // 매 AI 호출 직전 재사용
 
     public State CurrentState => _state;
     public Player CurrentPlayer => (_players != null && _currentIdx < _players.Length) ? _players[_currentIdx] : null;
@@ -68,8 +76,11 @@ public class CardGameManager : MonoBehaviour
     private void Start()
     {
         _aiProfiles = new[] { rightProfile, topProfile, leftProfile };
-        _ai  = new RandomAiStrategy(rngSeed);
+
+        AiDifficulty diff = useLobbyDifficulty ? AiDifficultySettings.Selected : aiDifficulty;
+        _ai  = CreateStrategy(diff, rngSeed);
         _rng = rngSeed == 0 ? new System.Random() : new System.Random(rngSeed);
+        Debug.Log($"[GameManager] AI 난이도: {diff}");
 
         if (passButton != null) passButton.onClick.AddListener(OnPassClicked);
         if (handManager != null) handManager.CardSubmitted += OnHumanCardPlayed;
@@ -288,89 +299,53 @@ public class CardGameManager : MonoBehaviour
     {
         yield return new WaitForSeconds(aiThinkDelay);
 
-        Card chosen = _ai.ChooseCard(fieldManager, p.Hand);
-        if (chosen != null && fieldManager.TryPlace(chosen))
+        int plays = 0;
+
+        // 사람과 동일 규칙: 낼 카드가 있으면 첫 장은 의무 제출, 이후 최대 maxPlaysPerTurn까지 선택 제출.
+        while (plays < maxPlaysPerTurn)
         {
+            FillAiContext(p, plays);
+            Card chosen = _ai.ChooseCard(fieldManager, p.Hand, _aiCtx);
+
+            // 의무 제출 가드: 첫 장에서 낼 카드가 있는데 전략이 null을 주면 강제로 1장 선택.
+            if (chosen == null && plays == 0 && fieldManager.HasAnyPlayable(p.Hand))
+            {
+                var playable = fieldManager.FilterPlayable(p.Hand);
+                chosen = playable[0];
+            }
+
+            if (chosen == null) break;                       // plays>=1에서 null = 자발적 턴 종료
+            if (!fieldManager.TryPlace(chosen)) break;        // 방어: 못 놓으면 종료
+
             p.Hand.Remove(chosen);
+            plays++;
             PlayerPlayedCard?.Invoke(p, chosen);
-            Debug.Log($"[GameManager] {p.Name} → {chosen}");
+            Debug.Log($"[GameManager] {p.Name} → {chosen} ({plays}/{maxPlaysPerTurn})");
+
+            // 카드 수 / 손패 가용성 즉시 갱신
+            for (int i = 0; i < _aiProfiles.Length; i++)
+                _aiProfiles[i]?.SetCardCount(_players[i + 1].Hand.Count);
+            handManager.RefreshPlayableStates();
+
+            if (p.Hand.Count == 0)
+            {
+                FinishGame(p);
+                yield break;
+            }
+
+            yield return new WaitForSeconds(aiPlayInterval); // 연속 제출 연출
         }
-        else
+
+        if (plays == 0) // 낼 카드가 정말 없었던 경우만 패스
         {
             p.PassCount++;
             PlayerPassed?.Invoke(p);
             Debug.Log($"[GameManager] {p.Name} 패스");
         }
 
-        // AI 카드수 갱신
-        for (int i = 0; i < _aiProfiles.Length; i++)
-            _aiProfiles[i]?.SetCardCount(_players[i + 1].Hand.Count);
-
-        // 필드가 바뀌었으니 내 손패 가용성 다시 그리기
         handManager.RefreshPlayableStates();
-
-        if (p.Hand.Count == 0)
-        {
-            FinishGame(p);
-            yield break;
-        }
-
         NextTurn();
     }
 
-    // ─────────────────────────────────────────────────────────────
-    //  Helpers
-    // ─────────────────────────────────────────────────────────────
-
-    private void NextTurn()
-    {
-        _currentIdx = (_currentIdx + 1) % _players.Length;
-        BeginTurn();
-    }
-
-    private void FinishGame(Player winner)
-    {
-        _state = State.GameOver;
-        for (int i = 0; i < _aiProfiles.Length; i++)
-            _aiProfiles[i]?.SetTurnActive(false);
-        RefreshTurnButton(); // 버튼 비활성화
-        GameWon?.Invoke(winner);
-        Debug.Log($"[GameManager] 🏆 승자: {winner.Name}");
-    }
-
-    private static List<Card> BuildDeckExcludingSevens()
-    {
-        var deck = new List<Card>(48);
-        foreach (Suit s in Enum.GetValues(typeof(Suit)))
-        {
-            for (int n = 1; n <= 13; n++)
-            {
-                if (n == Card.SevenNumber) continue;
-                deck.Add(new Card(s, n));
-            }
-        }
-        return deck;
-    }
-
-    private void Shuffle<T>(IList<T> list)
-    {
-        for (int i = list.Count - 1; i > 0; i--)
-        {
-            int j = _rng.Next(0, i + 1);
-            (list[i], list[j]) = (list[j], list[i]);
-        }
-    }
-
-    private string HandPreview(int idx)
-    {
-        IReadOnlyList<Card> h = idx == 0 ? handManager.Hand : _players[idx].Hand;
-        if (h == null || h.Count == 0) return "(empty)";
-        var sb = new System.Text.StringBuilder();
-        for (int i = 0; i < h.Count; i++)
-        {
-            sb.Append(h[i]);
-            if (i < h.Count - 1) sb.Append(' ');
-        }
-        return sb.ToString();
-    }
-}
+    /// <summary>AI 호출 직전 컨텍스트 갱신(상대 손패 수, 이번 턴 제출 수).</summary>
+    private void FillA

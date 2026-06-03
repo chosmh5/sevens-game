@@ -17,6 +17,14 @@ public class LobbyUI : MonoBehaviour
     [Header("Settings Panel")]
     [SerializeField] private GameObject settingsPanel;
 
+    [Header("AI Difficulty")]
+    [Tooltip("Easy / Normal / Hard 순서로 3개 버튼을 연결. 비워도 동작(코드 API로 설정 가능).")]
+    [SerializeField] private Button[] difficultyButtons; // [0]=Easy [1]=Normal [2]=Hard
+    [Tooltip("선택된 난이도 버튼 강조용(선택). difficultyButtons와 같은 순서.")]
+    [SerializeField] private Image[] difficultyHighlights;
+    [SerializeField] private Color difficultyNormalColor   = new Color(1f, 1f, 1f, 0.25f);
+    [SerializeField] private Color difficultySelectedColor = new Color(0.95f, 0.75f, 0.20f, 0.95f);
+
     [Header("3D Character")]
     [SerializeField] private Transform lobbyCharacter; // 로비에 서 있는 3D 캐릭터
     [SerializeField] private float dragRotateSpeed = 0.3f;
@@ -33,6 +41,41 @@ public class LobbyUI : MonoBehaviour
 
         if (settingsPanel != null)
             settingsPanel.SetActive(false);
+
+        SetupDifficultyButtons();
+    }
+
+    // ── AI 난이도 선택 ──────────────────────────────────────────────
+
+    private void SetupDifficultyButtons()
+    {
+        if (difficultyButtons == null) return;
+        for (int i = 0; i < difficultyButtons.Length; i++)
+        {
+            int idx = i; // 클로저 캡처 방지
+            difficultyButtons[i]?.onClick.AddListener(() => SetDifficulty(idx));
+        }
+        RefreshDifficultyHighlight();
+    }
+
+    /// <summary>난이도 선택(0=Easy, 1=Normal, 2=Hard). UI 버튼 OnClick에서 직접 연결해도 됨.</summary>
+    public void SetDifficulty(int difficulty)
+    {
+        AiDifficultySettings.Selected = (AiDifficulty)difficulty;
+        RefreshDifficultyHighlight();
+    }
+
+    private void RefreshDifficultyHighlight()
+    {
+        if (difficultyHighlights == null) return;
+        int selected = (int)AiDifficultySettings.Selected;
+        for (int i = 0; i < difficultyHighlights.Length; i++)
+        {
+            if (difficultyHighlights[i] == null) continue;
+            difficultyHighlights[i].color = (i == selected)
+                ? difficultySelectedColor
+                : difficultyNormalColor;
+        }
     }
 
     private void Update()
@@ -53,64 +96,4 @@ public class LobbyUI : MonoBehaviour
     private void OnSettings()
     {
         if (settingsPanel != null)
-            settingsPanel.SetActive(!settingsPanel.activeSelf);
-    }
-
-    /// <summary>
-    /// 화면 중앙(캐릭터 영역)을 드래그하면 캐릭터 회전
-    /// </summary>
-    private void HandleCharacterRotation()
-    {
-        if (lobbyCharacter == null) return;
-
-#if UNITY_EDITOR
-        // 에디터: 마우스
-        if (Input.GetMouseButtonDown(0) && IsInCharacterArea(Input.mousePosition))
-        {
-            isDraggingCharacter = true;
-            lastTouchX = Input.mousePosition.x;
-        }
-        if (Input.GetMouseButtonUp(0))
-            isDraggingCharacter = false;
-
-        if (isDraggingCharacter)
-        {
-            float delta = Input.mousePosition.x - lastTouchX;
-            lobbyCharacter.Rotate(0, -delta * dragRotateSpeed, 0);
-            lastTouchX = Input.mousePosition.x;
-        }
-#else
-        // 모바일: 터치
-        if (Input.touchCount == 1)
-        {
-            Touch touch = Input.GetTouch(0);
-
-            if (touch.phase == TouchPhase.Began && IsInCharacterArea(touch.position))
-            {
-                isDraggingCharacter = true;
-                lastTouchX = touch.position.x;
-            }
-            else if (touch.phase == TouchPhase.Moved && isDraggingCharacter)
-            {
-                float delta = touch.position.x - lastTouchX;
-                lobbyCharacter.Rotate(0, -delta * dragRotateSpeed, 0);
-                lastTouchX = touch.position.x;
-            }
-            else if (touch.phase == TouchPhase.Ended)
-            {
-                isDraggingCharacter = false;
-            }
-        }
-#endif
-    }
-
-    /// <summary>
-    /// 화면 중앙 영역인지 판단 (좌우 UI 영역 제외)
-    /// </summary>
-    private bool IsInCharacterArea(Vector2 screenPos)
-    {
-        float screenWidth = Screen.width;
-        // 화면의 중앙 60% 영역
-        return screenPos.x > screenWidth * 0.2f && screenPos.x < screenWidth * 0.8f;
-    }
-}
+            settingsPanel.SetActive(!settingsPanel.

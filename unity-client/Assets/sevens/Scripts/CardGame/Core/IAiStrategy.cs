@@ -7,6 +7,5 @@ public interface IAiStrategy
 {
     /// <summary>
     /// 손패에서 낼 카드 한 장 선택. 낼 수 있는 카드가 없으면 null 반환(= 패스).
-    /// </summary>
-    Card ChooseCard(FieldManager field, IReadOnlyList<Card> hand);
-}
+    ///
+    /// GameManager가 한 턴 동안 이 메서드를 최대 MaxPlaysPerTurn번

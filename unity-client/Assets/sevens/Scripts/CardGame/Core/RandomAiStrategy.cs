@@ -1,28 +1,16 @@
 using System.Collections.Generic;
 
 /// <summary>
-/// 가장 단순한 AI: 낼 수 있는 카드 중에서 무작위로 한 장 선택.
-/// 사양 8단계의 4번 우선순위에 해당하는 기본 AI.
+/// 세븐 게임의 AI 전략.
 ///
-/// 향후 고급 전략(7 우선, 극단 숫자 우선 등)은 IAiStrategy를 새로 구현해서 교체.
-/// </summary>
-public class RandomAiStrategy : IAiStrategy
-{
-    private readonly System.Random _rng;
-
-    /// <param name="seed">0이면 시스템 랜덤, 그 외에는 결정적 시드.</param>
-    public RandomAiStrategy(int seed = 0)
-    {
-        _rng = seed == 0 ? new System.Random() : new System.Random(seed);
-    }
-
-    public Card ChooseCard(FieldManager field, IReadOnlyList<Card> hand)
-    {
-        if (field == null || hand == null || hand.Count == 0) return null;
-
-        var playable = field.FilterPlayable(hand);
-        if (playable.Count == 0) return null;
-
-        return playable[_rng.Next(playable.Count)];
-    }
-}
+/// ── 설계 근거(시뮬레이션으로 검증) ────────────────────────────────
+/// 이 게임은 "의무 제출 + 턴당 최대 3장 + 줄이 7로 미리 열림" 규칙이라,
+/// 한 턴에 낼 수 있는 카드의 '집합'이 선택·순서와 무관하게 고정된다.
+/// → 어떤 카드를 영리하게 고르는지는 승률에 영향이 없고(최대화=최소화=무작위),
+///   유일하게 의미 있는 레버는 "낼 수 있는 만큼 다 내느냐"뿐이다.
+///   (완벽하게 둬도 승률 상한은 공정 몫 ~25%.)
+///
+/// 따라서 난이도는 '더 똑똑한 선택'이 아니라 '실수(추가 장 놓침) 빈도'로 표현한다.
+/// - overlookChance = 0.0  → Hard : 절대 안 놓침(완벽, 항상 최대 제출)
+/// - overlookChance = 0.20 → Normal
+/// - ove
