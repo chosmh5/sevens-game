@@ -135,11 +135,12 @@ return playable[rng.Next(playable.Count)];
 
 > `AiContext`는 `PlaysThisTurn`(첫 장/추가 장 구분)을 전달하는 용도. 상대 손패 수 필드도 채워두지만(향후 확장용) 현재 승률 무관이라 사용하지 않는다.
 
-### 6.1 로비 → 게임 씬 난이도 전달
-로비와 게임은 별도 씬이라 인스펙터 값이 공유되지 않는다. 선택값을 씬 전환 너머로 넘기는 방법:
-- **권장:** `static AiDifficulty SelectedDifficulty` 를 갖는 경량 설정 홀더(또는 `PlayerPrefs`에 int 저장). 로비에서 버튼 선택 시 기록 → `CardGameManager.Start()`에서 읽어 `CreateStrategy()`에 사용.
-- 로비 UI: Easy/Normal/Hard 토글(또는 세그먼트 버튼) 3개. 기본값 Normal.
-- `LobbyCharacterSetup` / 게임 시작 버튼 흐름에 선택 저장 한 줄만 추가하면 됨.
+### 6.1 로비 → 게임 씬 난이도 전달 (구현됨)
+로비와 게임은 별도 씬이라 인스펙터 값이 공유되지 않으므로, `AiDifficultySettings`(static + `PlayerPrefs`)로 보존한다. 로비에서 선택 시 기록 → `CardGameManager.Start()`가 읽어 `CreateStrategy()`에 사용.
+
+**UX 흐름:** 게임하기 → 난이도 팝업(쉬움/보통/어려움) → 시작 → 카드게임.
+- `LobbyUI`: `OnGameStart()`가 `difficultyPanel`을 띄우고, 팝업의 `SetDifficulty(i)`로 선택·강조, `시작` 버튼이 `GoToCardGame()` 호출.
+- 팝업 UI는 코드로 생성: 메뉴 **Tools ▸ Add Difficulty Popup to Lobby** (`LobbyDifficultySetup.cs`) 실행 시 기존 Lobby 씬에 팝업을 만들고 `LobbyUI` 필드를 자동 연결(재실행 안전). 기존 `LobbySceneSetup` 패턴을 따름.
 
 ---
 
@@ -205,6 +206,7 @@ return playable[rng.Next(playable.Count)];
 | `RandomAiStrategy.cs` | `overlookChance` 파라미터 추가(난이도 레버) |
 | `AiDifficulty.cs` | **신규** — enum + `AiDifficultySettings`(PlayerPrefs 홀더) |
 | `AiContext.cs` | **신규** — PlaysThisTurn 등 턴 컨텍스트 |
-| `LobbyUI.cs` | 난이도 선택 버튼/하이라이트 + `SetDifficulty()` |
+| `LobbyUI.cs` | 난이도 팝업 흐름(게임하기→팝업→시작) + `SetDifficulty()`/하이라이트 |
+| `Editor/LobbyDifficultySetup.cs` | **신규** — 기존 Lobby 씬에 난이도 팝업 생성·자동 연결하는 메뉴 도구 |
 | `GreedyAiStrategy.cs` / `HeuristicAiStrategy.cs` | (작성 후) **폐기** — 효과 없음으로 삭제 |
 | `FieldManager / FieldLine / Card / Player` | 변경 없음 |

@@ -17,8 +17,14 @@ public class LobbyUI : MonoBehaviour
     [Header("Settings Panel")]
     [SerializeField] private GameObject settingsPanel;
 
-    [Header("AI Difficulty")]
-    [Tooltip("Easy / Normal / Hard 순서로 3개 버튼을 연결. 비워도 동작(코드 API로 설정 가능).")]
+    [Header("AI Difficulty Popup")]
+    [Tooltip("'게임하기'를 누르면 표시되는 난이도 선택 팝업. 비어 있으면 바로 게임 진입.")]
+    [SerializeField] private GameObject difficultyPanel;
+    [Tooltip("팝업 안의 '시작' 버튼 → 선택한 난이도로 카드게임 진입.")]
+    [SerializeField] private Button startGameButton;
+    [Tooltip("팝업 닫기/취소 버튼(선택).")]
+    [SerializeField] private Button difficultyCancelButton;
+    [Tooltip("Easy / Normal / Hard 순서로 3개 버튼을 연결.")]
     [SerializeField] private Button[] difficultyButtons; // [0]=Easy [1]=Normal [2]=Hard
     [Tooltip("선택된 난이도 버튼 강조용(선택). difficultyButtons와 같은 순서.")]
     [SerializeField] private Image[] difficultyHighlights;
@@ -43,6 +49,10 @@ public class LobbyUI : MonoBehaviour
             settingsPanel.SetActive(false);
 
         SetupDifficultyButtons();
+
+        if (difficultyPanel != null) difficultyPanel.SetActive(false);
+        startGameButton?.onClick.AddListener(OnConfirmStart);
+        difficultyCancelButton?.onClick.AddListener(CloseDifficultyPanel);
     }
 
     // ── AI 난이도 선택 ──────────────────────────────────────────────
@@ -56,6 +66,23 @@ public class LobbyUI : MonoBehaviour
             difficultyButtons[i]?.onClick.AddListener(() => SetDifficulty(idx));
         }
         RefreshDifficultyHighlight();
+    }
+
+    private void OpenDifficultyPanel()
+    {
+        RefreshDifficultyHighlight();
+        difficultyPanel.SetActive(true);
+    }
+
+    private void CloseDifficultyPanel()
+    {
+        if (difficultyPanel != null) difficultyPanel.SetActive(false);
+    }
+
+    /// <summary>팝업의 '시작' 버튼 → 선택된 난이도로 카드게임 진입.</summary>
+    private void OnConfirmStart()
+    {
+        GameSceneManager.Instance?.GoToCardGame();
     }
 
     /// <summary>난이도 선택(0=Easy, 1=Normal, 2=Hard). UI 버튼 OnClick에서 직접 연결해도 됨.</summary>
@@ -85,7 +112,11 @@ public class LobbyUI : MonoBehaviour
 
     private void OnGameStart()
     {
-        GameSceneManager.Instance?.GoToCardGame();
+        // 난이도 팝업이 있으면 먼저 띄우고, 없으면 바로 게임 진입(하위 호환).
+        if (difficultyPanel != null)
+            OpenDifficultyPanel();
+        else
+            GameSceneManager.Instance?.GoToCardGame();
     }
 
     private void OnMyRoom()
@@ -96,4 +127,64 @@ public class LobbyUI : MonoBehaviour
     private void OnSettings()
     {
         if (settingsPanel != null)
-            settingsPanel.SetActive(!settingsPanel.
+            settingsPanel.SetActive(!settingsPanel.activeSelf);
+    }
+
+    /// <summary>
+    /// 화면 중앙(캐릭터 영역)을 드래그하면 캐릭터 회전
+    /// </summary>
+    private void HandleCharacterRotation()
+    {
+        if (lobbyCharacter == null) return;
+
+#if UNITY_EDITOR
+        // 에디터: 마우스
+        if (Input.GetMouseButtonDown(0) && IsInCharacterArea(Input.mousePosition))
+        {
+            isDraggingCharacter = true;
+            lastTouchX = Input.mousePosition.x;
+        }
+        if (Input.GetMouseButtonUp(0))
+            isDraggingCharacter = false;
+
+        if (isDraggingCharacter)
+        {
+            float delta = Input.mousePosition.x - lastTouchX;
+            lobbyCharacter.Rotate(0, -delta * dragRotateSpeed, 0);
+            lastTouchX = Input.mousePosition.x;
+        }
+#else
+        // 모바일: 터치
+        if (Input.touchCount == 1)
+        {
+            Touch touch = Input.GetTouch(0);
+
+            if (touch.phase == TouchPhase.Began && IsInCharacterArea(touch.position))
+            {
+                isDraggingCharacter = true;
+                lastTouchX = touch.position.x;
+            }
+            else if (touch.phase == TouchPhase.Moved && isDraggingCharacter)
+            {
+                float delta = touch.position.x - lastTouchX;
+                lobbyCharacter.Rotate(0, -delta * dragRotateSpeed, 0);
+                lastTouchX = touch.position.x;
+            }
+            else if (touch.phase == TouchPhase.Ended)
+            {
+                isDraggingCharacter = false;
+            }
+        }
+#endif
+    }
+
+    /// <summary>
+    /// 화면 중앙 영역인지 판단 (좌우 UI 영역 제외)
+    /// </summary>
+    private bool IsInCharacterArea(Vector2 screenPos)
+    {
+        float screenWidth = Screen.width;
+        // 화면의 중앙 60% 영역
+        return screenPos.x > screenWidth * 0.2f && screenPos.x < screenWidth * 0.8f;
+    }
+}
