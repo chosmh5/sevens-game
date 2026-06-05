@@ -24,6 +24,8 @@ public class CardGameManager : MonoBehaviour
     [SerializeField] private HandManager  handManager;
     [SerializeField] private Button       passButton;
     [SerializeField] private TMP_Text     passButtonLabel; // "패스" ↔ "턴 종료" 라벨 전환용
+    [Tooltip("이번 턴에 낸 카드를 한 장씩 취소(되돌리기). 턴 종료 전까지만 가능.")]
+    [SerializeField] private Button       undoButton;
 
     [Header("Opponent Profiles")]
     [Tooltip("우측(상대 1), 상단(상대 2), 좌측(상대 3) 순서로 GameManager가 자동으로 매핑.")]
@@ -62,6 +64,7 @@ public class CardGameManager : MonoBehaviour
     private System.Random _rng;
     private OpponentProfile[] _aiProfiles; // index 0..2 → AI player 1..3
     private readonly AiContext _aiCtx = new AiContext(); // 매 AI 호출 직전 재사용
+    private readonly Stack<Card> _pendingPlays = new Stack<Card>(); // 이번 턴 사람이 낸 카드(취소용)
 
     public State CurrentState => _state;
     public Player CurrentPlayer => (_players != null && _currentIdx < _players.Length) ? _players[_currentIdx] : null;
@@ -83,6 +86,7 @@ public class CardGameManager : MonoBehaviour
         Debug.Log($"[GameManager] AI 난이도: {diff}");
 
         if (passButton != null) passButton.onClick.AddListener(OnPassClicked);
+        if (undoButton != null) undoButton.onClick.AddListener(OnUndoClicked);
         if (handManager != null) handManager.CardSubmitted += OnHumanCardPlayed;
 
         if (runOnStart) StartNewGame();
@@ -91,6 +95,7 @@ public class CardGameManager : MonoBehaviour
     private void OnDestroy()
     {
         if (passButton  != null) passButton.onClick.RemoveListener(OnPassClicked);
+        if (undoButton  != null) undoButton.onClick.RemoveListener(OnUndoClicked);
         if (handManager != null) handManager.CardSubmitted -= OnHumanCardPlayed;
     }
 
@@ -159,7 +164,8 @@ public class CardGameManager : MonoBehaviour
         if (_state == State.GameOver) return;
 
         var p = _players[_currentIdx];
-        _playsThisTurn = 0; // 새 턴 시작 — 카운터 리셋
+        _playsThisTurn = 0;       // 새 턴 시작 — 카운터 리셋
+        _pendingPlays.Clear();    // 이전 턴 제출은 확정됨 — 취소 스택 비움
 
         // 프로필 강조 갱신
         for (int i = 0; i < _aiProfiles.Length; i++)
@@ -172,13 +178,14 @@ public class CardGameManager : MonoBehaviour
         if (p.IsAI)
         {
             _state = State.AITurn;
+            handManager.SetInteractable(false); // 상대 턴: 내 손패 입력 차단
             RefreshTurnButton();
             StartCoroutine(RunAITurn(p));
         }
         else
         {
             _state = State.PlayerTurn;
-            handManager.RefreshPlayableStates();
+            handManager.SetInteractable(true);  // 내 턴: 입력 허용 + 가용 카드 표시
             RefreshTurnButton();
             Debug.Log("[GameManager] 당신의 턴입니다.");
         }
@@ -194,6 +201,7 @@ public class CardGameManager : MonoBehaviour
 
         // HandManager가 이미 fieldManager.TryPlace 호출 + 자기 손에서 제거 완료.
         _playsThisTurn++;
+        _pendingPlays.Push(card); // 취소 가능하도록 기록
         PlayerPlayedCard?.Invoke(_players[0], card);
         Debug.Log($"[GameManager] {_players[0].Name} → {card} ({_playsThisTurn}/{maxPlaysPerTurn})");
 
@@ -249,6 +257,31 @@ public class CardGameManager : MonoBehaviour
     }
 
     /// <summary>
+    /// 취소(되돌리기) 버튼 클릭. 이번 턴에 낸 카드를 한 장씩 되돌린다.
+    /// 필드에서 제거 → 손패로 복귀 → 카운터 감소. 턴 종료 전까지만 가능.
+    /// </summary>
+    private void OnUndoClicked()
+    {
+        if (_state != State.PlayerTurn) return;
+        if (_pendingPlays.Count == 0) return;
+
+        Card card = _pendingPlays.Pop();
+        if (!fieldManager.UndoPlace(card))
+        {
+            // 되돌리기 실패(예상치 못한 상태) — 스택 복원
+            _pendingPlays.Push(card);
+            Debug.LogWarning($"[GameManager] {card} 되돌리기 실패 — 무시.");
+            return;
+        }
+
+        handManager.ReturnCard(card); // 손패로 복귀(+ 잠금 해제/가용성 갱신)
+        _playsThisTurn--;
+        Debug.Log($"[GameManager] {_players[0].Name} 취소 ← {card} ({_playsThisTurn}/{maxPlaysPerTurn})");
+
+        RefreshTurnButton();
+    }
+
+    /// <summary>
     /// 버튼 상태/라벨 결정:
     /// 기본은 항상 "턴 종료". 단, 낼 카드 자체가 없는 상태에서만 "패스"로 바뀐다.
     ///
@@ -259,6 +292,10 @@ public class CardGameManager : MonoBehaviour
     /// </summary>
     private void RefreshTurnButton()
     {
+        // 취소 버튼: 내 턴이고 이번 턴에 낸 카드가 있을 때만 활성.
+        if (undoButton != null)
+            undoButton.interactable = (_state == State.PlayerTurn && _pendingPlays.Count > 0);
+
         if (passButton == null) return;
 
         if (_state != State.PlayerTurn)
@@ -348,4 +385,92 @@ public class CardGameManager : MonoBehaviour
     }
 
     /// <summary>AI 호출 직전 컨텍스트 갱신(상대 손패 수, 이번 턴 제출 수).</summary>
-    private void FillA
+    private void FillAiContext(Player self, int playsThisTurn)
+    {
+        _aiCtx.SelfIndex       = self.Index;
+        _aiCtx.PlaysThisTurn   = playsThisTurn;
+        _aiCtx.MaxPlaysPerTurn = maxPlaysPerTurn;
+
+        _aiCtx.OpponentHandCounts.Clear();
+        for (int i = 0; i < _players.Length; i++)
+        {
+            if (i == self.Index) continue;
+            // 사람(0번)의 손패는 HandManager가 소유.
+            int count = (i == 0) ? handManager.Hand.Count : _players[i].Hand.Count;
+            _aiCtx.OpponentHandCounts.Add(count);
+        }
+    }
+
+    /// <summary>
+    /// 난이도 → 전략 인스턴스.
+    /// 이 게임은 카드 선택이 승률에 무관하므로(시뮬레이션 검증), 난이도는
+    /// '추가 장 놓침 확률(overlookChance)'로 구현한다. Hard는 0(완벽).
+    /// </summary>
+    private static IAiStrategy CreateStrategy(AiDifficulty d, int seed)
+    {
+        switch (d)
+        {
+            case AiDifficulty.Easy:   return new RandomAiStrategy(seed, 0.55f);
+            case AiDifficulty.Normal: return new RandomAiStrategy(seed, 0.20f);
+            case AiDifficulty.Hard:   return new RandomAiStrategy(seed, 0.00f);
+            default:                  return new RandomAiStrategy(seed, 0.20f);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    //  Helpers
+    // ─────────────────────────────────────────────────────────────
+
+    private void NextTurn()
+    {
+        _currentIdx = (_currentIdx + 1) % _players.Length;
+        BeginTurn();
+    }
+
+    private void FinishGame(Player winner)
+    {
+        _state = State.GameOver;
+        handManager.SetInteractable(false); // 게임오버: 입력 차단
+        for (int i = 0; i < _aiProfiles.Length; i++)
+            _aiProfiles[i]?.SetTurnActive(false);
+        RefreshTurnButton(); // 버튼 비활성화
+        GameWon?.Invoke(winner);
+        Debug.Log($"[GameManager] 🏆 승자: {winner.Name}");
+    }
+
+    private static List<Card> BuildDeckExcludingSevens()
+    {
+        var deck = new List<Card>(48);
+        foreach (Suit s in Enum.GetValues(typeof(Suit)))
+        {
+            for (int n = 1; n <= 13; n++)
+            {
+                if (n == Card.SevenNumber) continue;
+                deck.Add(new Card(s, n));
+            }
+        }
+        return deck;
+    }
+
+    private void Shuffle<T>(IList<T> list)
+    {
+        for (int i = list.Count - 1; i > 0; i--)
+        {
+            int j = _rng.Next(0, i + 1);
+            (list[i], list[j]) = (list[j], list[i]);
+        }
+    }
+
+    private string HandPreview(int idx)
+    {
+        IReadOnlyList<Card> h = idx == 0 ? handManager.Hand : _players[idx].Hand;
+        if (h == null || h.Count == 0) return "(empty)";
+        var sb = new System.Text.StringBuilder();
+        for (int i = 0; i < h.Count; i++)
+        {
+            sb.Append(h[i]);
+            if (i < h.Count - 1) sb.Append(' ');
+        }
+        return sb.ToString();
+    }
+}

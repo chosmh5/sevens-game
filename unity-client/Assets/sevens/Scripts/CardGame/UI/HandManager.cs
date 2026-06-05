@@ -34,6 +34,9 @@ public class HandManager : MonoBehaviour
     private readonly List<CardUI> _cardUIs  = new List<CardUI>();
     private CardUI                _selected;
 
+    /// <summary>현재 손패 입력 허용 여부. 내 턴이 아닐 땐 false (GameManager가 제어).</summary>
+    private bool _interactable = false;
+
     /// <summary>현재 손패(읽기 전용).</summary>
     public IReadOnlyList<Card> Hand => _hand;
 
@@ -70,6 +73,22 @@ public class HandManager : MonoBehaviour
         RefreshPlayableStates();
     }
 
+    /// <summary>
+    /// 제출 취소로 카드를 손패에 되돌린다. 정렬 위치에 다시 꽂고 UI를 재구성한다.
+    /// </summary>
+    public void ReturnCard(Card card)
+    {
+        if (card == null) return;
+        _hand.Add(card);
+        _hand.Sort((a, b) =>
+        {
+            int s = a.Suit.CompareTo(b.Suit);
+            return s != 0 ? s : a.Number.CompareTo(b.Number);
+        });
+        RebuildUI();
+        RefreshPlayableStates();
+    }
+
     /// <summary>손패 비우기.</summary>
     public void ClearHand()
     {
@@ -90,6 +109,21 @@ public class HandManager : MonoBehaviour
         return SubmitCard(_selected);
     }
 
+    /// <summary>
+    /// 손패 입력 허용 여부 설정. 내 턴 시작 시 true, AI 턴/게임오버 시 false.
+    /// false면 카드 클릭이 무시되고(상대 턴 중 제출 버그 방지), 모든 카드가 비활성 표시된다.
+    /// </summary>
+    public void SetInteractable(bool value)
+    {
+        _interactable = value;
+        if (!value && _selected != null)
+        {
+            _selected.SetSelected(false);
+            _selected = null;
+        }
+        RefreshPlayableStates();
+    }
+
     /// <summary>외부에서 필드 상태가 바뀐 뒤 호출해 손패 가용성을 다시 그리도록.</summary>
     public void RefreshPlayableStates()
     {
@@ -98,7 +132,8 @@ public class HandManager : MonoBehaviour
         {
             var ui = _cardUIs[i];
             if (ui == null) continue;
-            bool playable = fieldManager.CanPlace(ui.Card);
+            // 내 턴이 아니면 전부 비활성 표시(클릭도 차단됨).
+            bool playable = _interactable && fieldManager.CanPlace(ui.Card);
             ui.SetPlayable(playable);
         }
     }
@@ -153,6 +188,9 @@ public class HandManager : MonoBehaviour
     {
         if (ui == null) return;
 
+        // 내 턴이 아니면 입력 무시 (상대 턴 중 카드 제출 버그 방지).
+        if (!_interactable) return;
+
         // 같은 카드를 다시 클릭한 경우
         if (_selected == ui)
         {
@@ -191,6 +229,7 @@ public class HandManager : MonoBehaviour
     private bool SubmitCard(CardUI ui)
     {
         if (ui == null || ui.Card == null) return false;
+        if (!_interactable) return false; // 내 턴이 아니면 제출 불가(방어)
         if (fieldManager == null)
         {
             Debug.LogWarning("[HandManager] FieldManager가 연결되지 않았습니다.");

@@ -17,6 +17,9 @@ public class FieldManager : MonoBehaviour
     /// <summary>카드가 필드에 놓였을 때 발생. (Card, 놓인 라인의 Suit)</summary>
     public event Action<Card, FieldLine> CardPlaced;
 
+    /// <summary>카드가 필드에서 되돌려졌을 때(제출 취소) 발생. (Card, 라인)</summary>
+    public event Action<Card, FieldLine> CardRemoved;
+
     /// <summary>필드가 리셋(라운드 시작)됐을 때 발생.</summary>
     public event Action FieldReset;
 
@@ -88,6 +91,19 @@ public class FieldManager : MonoBehaviour
         var line = _lines[card.Suit];
         line.Place(card);
         CardPlaced?.Invoke(card, line);
+        return true;
+    }
+
+    /// <summary>
+    /// 카드 제출을 되돌린다(취소). 되돌릴 카드는 해당 줄의 현재 끝이어야 한다.
+    /// 성공하면 true, CardRemoved 이벤트 발생(뷰가 슬롯을 비우도록).
+    /// </summary>
+    public bool UndoPlace(Card card)
+    {
+        if (card == null) return false;
+        var line = _lines[card.Suit];
+        if (!line.Undo(card)) return false;
+        CardRemoved?.Invoke(card, line);
         return true;
     }
 

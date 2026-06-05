@@ -74,6 +74,29 @@ public class FieldLine
         if (card.Number > MaxPlaced) MaxPlaced = card.Number;
     }
 
+    /// <summary>
+    /// 직전에 놓인 끝(현재 Min 또는 Max) 카드를 되돌린다(제출 취소용).
+    /// 되돌릴 카드는 반드시 현재 줄의 끝(Min 또는 Max)이어야 한다.
+    /// 7(오프닝)은 되돌리지 않는다. 성공하면 true.
+    /// </summary>
+    public bool Undo(Card card)
+    {
+        if (card == null || !IsOpen || card.IsSeven) return false;
+        if (card.Suit != Suit) return false;
+
+        if (card.Number == MinPlaced && MinPlaced < Card.SevenNumber)
+        {
+            MinPlaced += 1; // 한 칸 위로 되돌림
+            return true;
+        }
+        if (card.Number == MaxPlaced && MaxPlaced > Card.SevenNumber)
+        {
+            MaxPlaced -= 1; // 한 칸 아래로 되돌림
+            return true;
+        }
+        return false;
+    }
+
     /// <summary>줄 상태 리셋. 라운드 재시작 시 사용.</summary>
     public void Reset()
     {

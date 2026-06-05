@@ -58,6 +58,7 @@ public class FieldLineView : MonoBehaviour
     {
         if (_subscribed || fieldManager == null) return;
         fieldManager.CardPlaced += OnCardPlaced;
+        fieldManager.CardRemoved += OnCardRemoved;
         fieldManager.FieldReset += OnFieldReset;
         _subscribed = true;
     }
@@ -66,6 +67,7 @@ public class FieldLineView : MonoBehaviour
     {
         if (!_subscribed || fieldManager == null) return;
         fieldManager.CardPlaced -= OnCardPlaced;
+        fieldManager.CardRemoved -= OnCardRemoved;
         fieldManager.FieldReset -= OnFieldReset;
         _subscribed = false;
     }
@@ -74,6 +76,12 @@ public class FieldLineView : MonoBehaviour
     {
         if (card == null || card.Suit != suit) return;
         Fill(card);
+    }
+
+    private void OnCardRemoved(Card card, FieldLine line)
+    {
+        if (card == null || card.Suit != suit) return;
+        ClearSlot(card.Number); // 취소된 카드 슬롯 비우기
     }
 
     private void OnFieldReset()
@@ -103,6 +111,16 @@ public class FieldLineView : MonoBehaviour
         img.sprite = sprite;
         img.color  = filledSlotColor;
         img.preserveAspect = true;
+    }
+
+    private void ClearSlot(int number)
+    {
+        int idx = number - 1;
+        if (idx < 0 || idx >= slots.Length) return;
+        var img = slots[idx];
+        if (img == null) return;
+        img.sprite = null;
+        img.color  = emptySlotColor;
     }
 
     private void ClearAll()
