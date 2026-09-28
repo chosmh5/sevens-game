@@ -131,6 +131,112 @@ public static class MToonURPFixer
         m.SetOverrideTag("RenderType", "Opaque");
     }
 
+    /// <summary>
+    /// FixHierarchy() 이후에 호출. 이미 Opaque 로 바뀐 MToon 머티리얼 중
+    /// 얼굴 디테일을 제외한 모든 머티리얼을 Cutoff 로 재설정한다.
+    /// transparentKeywords 에 해당하는 머티리얼은 Cutoff 대신 Transparent 로 설정한다.
+    /// </summary>
+    public static int ApplyMyRoomOverrides(GameObject root, string[] transparentKeywords = null, float cutoffThreshold = 0.5f)
+    {
+        if (root == null) return 0;
+
+        int cutoffCount = 0, transparentCount = 0;
+        var renderers = root.GetComponentsInChildren<Renderer>(includeInactive: true);
+
+        foreach (var renderer in renderers)
+        {
+            var mats = renderer.materials; // 인스턴스 배열
+            bool anyChanged = false;
+
+            for (int i = 0; i < mats.Length; i++)
+            {
+                var mat = mats[i];
+                if (mat == null) continue;
+
+                string shaderName = mat.shader != null ? mat.shader.name : "";
+                if (shaderName != MToonShaderName) continue;
+
+                // 얼굴 디테일은 건드리지 않음
+                if (NameContainsAny(mat.name, KeepTransparentKeywords)) continue;
+
+                if (transparentKeywords != null && NameContainsAny(mat.name, transparentKeywords))
+                {
+                    // Tops 등 지정된 머티리얼 → Transparent
+                    ForceTransparent(mat);
+                    anyChanged = true;
+                    transparentCount++;
+                    if (Verbose)
+                        Debug.Log($"[MToonURPFixer] [Transparent] {renderer.name}/{mat.name}");
+                }
+                else
+                {
+                    // 나머지 body 머티리얼 → Cutoff
+                    ForceCutoff(mat, cutoffThreshold);
+                    anyChanged = true;
+                    cutoffCount++;
+                    if (Verbose)
+                        Debug.Log($"[MToonURPFixer] [Cutoff] {renderer.name}/{mat.name} → Cutoff({cutoffThreshold})");
+                }
+            }
+
+            if (anyChanged) renderer.materials = mats;
+        }
+
+        int total = cutoffCount + transparentCount;
+        if (total > 0)
+            Debug.Log($"[MToonURPFixer] MyRoom 오버라이드 요약: Cutoff {cutoffCount}개, Transparent {transparentCount}개");
+
+        return total;
+    }
+
+    /// <summary>
+    /// MToon 머티리얼을 Cutoff(TransparentCutout / AlphaTest) 모드로 설정한다.
+    /// BlendMode=1, _ALPHATEST_ON 키워드 활성화, RenderQueue=AlphaTest.
+    /// </summary>
+    private static void ForceCutoff(Material m, float cutoff = 0.5f)
+    {
+        if (m.HasProperty("_BlendMode"))   m.SetFloat("_BlendMode", 1f); // 1 = Cutout
+        if (m.HasProperty("_SrcBlend"))    m.SetFloat("_SrcBlend",  (float)BlendMode.One);
+        if (m.HasProperty("_DstBlend"))    m.SetFloat("_DstBlend",  (float)BlendMode.Zero);
+        if (m.HasProperty("_ZWrite"))      m.SetFloat("_ZWrite",    1f);
+        if (m.HasProperty("_AlphaToMask")) m.SetFloat("_AlphaToMask", 1f);
+        if (m.HasProperty("_Cutoff"))      m.SetFloat("_Cutoff",    cutoff);
+
+        m.EnableKeyword("_ALPHATEST_ON");
+        m.DisableKeyword("_ALPHABLEND_ON");
+        m.DisableKeyword("_ALPHAPREMULTIPLY_ON");
+
+        if (m.HasProperty("_Color"))
+        {
+            var c = m.GetColor("_Color");
+            c.a = 1f;
+            m.SetColor("_Color", c);
+        }
+
+        m.renderQueue = (int)RenderQueue.AlphaTest; // 2450
+        m.SetOverrideTag("RenderType", "TransparentCutout");
+    }
+
+    /// <summary>
+    /// MToon 머티리얼을 Transparent 모드로 설정한다.
+    /// BlendMode=2, _ALPHABLEND_ON 키워드 활성화, RenderQueue=Transparent.
+    /// </summary>
+    private static void ForceTransparent(Material m)
+    {
+        if (m.HasProperty("_BlendMode"))   m.SetFloat("_BlendMode", 2f); // 2 = Transparent
+        if (m.HasProperty("_SrcBlend"))    m.SetFloat("_SrcBlend",  (float)BlendMode.SrcAlpha);
+        if (m.HasProperty("_DstBlend"))    m.SetFloat("_DstBlend",  (float)BlendMode.OneMinusSrcAlpha);
+        if (m.HasProperty("_ZWrite"))      m.SetFloat("_ZWrite",    0f);
+        if (m.HasProperty("_AlphaToMask")) m.SetFloat("_AlphaToMask", 0f);
+
+        m.DisableKeyword("_ALPHATEST_ON");
+        m.EnableKeyword("_ALPHABLEND_ON");
+        m.DisableKeyword("_ALPHAPREMULTIPLY_ON");
+
+        m.renderQueue = (int)RenderQueue.Transparent; // 3000
+        m.SetOverrideTag("RenderType", "Transparent");
+    }
+
     private static void DisableOutline(Material m)
     {
         if (m.HasProperty("_OutlineWidth"))       m.SetFloat("_OutlineWidth", 0f);

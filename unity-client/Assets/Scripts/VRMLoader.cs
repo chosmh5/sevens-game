@@ -1,6 +1,7 @@
 using System.IO;
 using System.Threading.Tasks;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 using UniGLTF;
 using VRM;
 
@@ -60,8 +61,14 @@ public class VRMLoader : MonoBehaviour
         }
 
         // ── URP 호환성 픽스: VRM 의 MToon 셰이더는 Built-in 전용이라 URP 환경에서
-        //    캐릭터가 반투명하게 보이는 버그를 일으킨다. 로드 직후 URP/Lit 으로 교체한다.
+        //    캐릭터가 반투명하게 보이는 버그를 일으킨다. 로드 직후 속성만 수정한다.
         MToonURPFixer.FixHierarchy(root);
+
+        // 마이룸 씬이면 body → Cutoff, Tops → Transparent 오버라이드
+        if (SceneManager.GetActiveScene().name == "MyRoom")
+        {
+            MToonURPFixer.ApplyMyRoomOverrides(root, new[] { "Tops" });
+        }
 
         LoadedCharacter = root;
         Debug.Log($"[VRMLoader] {vrmFileName} 로드 완료");
