@@ -1,4 +1,6 @@
 using UnityEngine;
+using UnityEngine.AI;
+using Unity.AI.Navigation;
 using System.Collections.Generic;
 
 /// <summary>
@@ -589,10 +591,52 @@ public class VegasCityGenerator : MonoBehaviour
         BuildRoads();
         BuildBuildings();
         BuildStreetLights();
+
+        // ── 런타임 NavMesh 베이킹 (NPC/아바타 이동용) ──
+        BakeRuntimeNavMesh();
+
         SetupPlayerSpawn();
 
         Debug.Log($"[VegasCity] 도시 생성 완료: 건물 {currentMapData.buildings.Count}개, 그리드 {gridWidth}x{gridHeight}");
     }
+
+    /// <summary>
+    /// 프로시저럴 도시 위에 런타임 NavMesh를 베이크.
+    /// 도로·인도·지면의 콜라이더를 기반으로 NavMesh를 생성하여
+    /// NavMeshAgent 기반 캐릭터(류, 진 등)가 이동할 수 있게 한다.
+    /// </summary>
+    private void BakeRuntimeNavMesh()
+    {
+        // 기존 씬의 NavMeshSurface(Plane에 붙어 있던 것)는
+        // DisableConflictingSceneObjects에서 Plane과 함께 비활성화됨.
+        // 따라서 CityRoot에 새 NavMeshSurface를 부착하여 런타임 베이크.
+
+        NavMeshSurface surface = cityRoot.GetComponent<NavMeshSurface>();
+        if (surface == null)
+            surface = cityRoot.AddComponent<NavMeshSurface>();
+
+        surface.collectObjects = CollectObjects.Children;  // CityRoot 하위만 수집
+        surface.useGeometry = NavMeshCollectGeometry.PhysicsColliders; // 콜라이더 기반
+        surface.defaultArea = 0;      // Walkable
+        surface.agentTypeID = 0;      // Humanoid (기본)
+        surface.overrideTileSize = false;
+        surface.overrideVoxelSize = false;
+
+        surface.BuildNavMesh();
+
+        // 베이크 결과 확인
+        NavMeshTriangulation tri = NavMesh.CalculateTriangulation();
+        Debug.Log($"[VegasCity] 런타임 NavMesh 베이크 완료: 삼각형={tri.indices.Length / 3}, 정점={tri.vertices.Length}");
+
+        // NavMesh 베이크 완료 이벤트 — NPC들이 대기 중일 수 있음
+        OnNavMeshReady?.Invoke();
+    }
+
+    /// <summary>
+    /// NavMesh 베이크가 완료되면 발생하는 이벤트.
+    /// NPCController 등이 구독하여 NavMesh 준비 후 초기화할 수 있다.
+    /// </summary>
+    public static event System.Action OnNavMeshReady;
 
     /// <summary>
     /// 기본 지면

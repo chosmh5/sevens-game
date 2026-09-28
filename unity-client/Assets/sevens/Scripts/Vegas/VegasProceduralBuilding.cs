@@ -807,7 +807,10 @@ public static class VegasProceduralBuilding
         pointLight.color = neonColor;
         pointLight.intensity = 1.5f;
         pointLight.range = 12f;
+        pointLight.lightShadowCasterMode = LightShadowCasterMode.Default;
+#if UNITY_EDITOR
         pointLight.lightmapBakeType = LightmapBakeType.Mixed; // Mixed 모드
+#endif
 
         return root;
     }

@@ -26,16 +26,37 @@ public class CyberpunkUIBootstrapper : MonoBehaviour
     private Canvas cyberpunkCanvas;
 
     /// <summary>
-    /// 씬 로드 시 자동으로 부트스트래퍼 생성 (수동 배치 불필요)
+    /// 앱 시작 시 sceneLoaded 이벤트 등록 (1회)
+    /// → 이후 매 씬 로드마다 OnSceneLoaded가 호출되어 부트스트래퍼 생성
     /// </summary>
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
     private static void AutoBootstrap()
+    {
+        // 첫 씬(앱 시작 직후)도 처리 + 이후 씬 전환도 처리
+        UnityEngine.SceneManagement.SceneManager.sceneLoaded += OnSceneLoaded;
+
+        // 현재 씬에도 즉시 적용 (앱 시작 씬)
+        var currentScene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+        TryCreateBootstrapper(currentScene.name);
+    }
+
+    /// <summary>
+    /// 매 씬 로드 시 호출 — 부트스트래퍼가 없으면 생성
+    /// </summary>
+    private static void OnSceneLoaded(UnityEngine.SceneManagement.Scene scene, UnityEngine.SceneManagement.LoadSceneMode mode)
+    {
+        TryCreateBootstrapper(scene.name);
+    }
+
+    /// <summary>
+    /// 조건을 확인하고 부트스트래퍼 생성
+    /// </summary>
+    private static void TryCreateBootstrapper(string sceneName)
     {
         // 이미 존재하면 스킵
         if (FindAnyObjectByType<CyberpunkUIBootstrapper>() != null) return;
 
         // 타이틀 화면에서는 CyberpunkUI 불필요 — 스킵
-        string sceneName = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
         if (sceneName == "TitleScreen") return;
 
         GameObject go = new GameObject("[CyberpunkUI]");
@@ -69,6 +90,7 @@ public class CyberpunkUIBootstrapper : MonoBehaviour
         if (replaceJoystick) SetupJoystick();
         if (replaceHUD) SetupHUD();
         if (replaceDialogue) SetupDialogue();
+        SetupDialogueLog();
         SetupMapEditor();
     }
 
@@ -183,6 +205,16 @@ public class CyberpunkUIBootstrapper : MonoBehaviour
 
         dialogueObj.AddComponent<CyberpunkDialogueUI>();
         Debug.Log("[CyberpunkUI] CyberpunkDialogueUI 생성됨");
+    }
+
+    private void SetupDialogueLog()
+    {
+        if (FindAnyObjectByType<DialogueLog>() != null) return;
+
+        GameObject logObj = new GameObject("DialogueLog");
+        logObj.transform.SetParent(transform);
+        logObj.AddComponent<DialogueLog>();
+        Debug.Log("[CyberpunkUI] DialogueLog 생성됨");
     }
 
     /// <summary>

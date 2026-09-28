@@ -22,6 +22,7 @@ public class PlayerController : MonoBehaviour
     {
         if (TitleScreenManager.IsActive) return;
         if (PlayerInteraction.Instance != null && PlayerInteraction.Instance.IsInteracting) return;
+        if (ConversationWatchMode.IsWatching) return;
 
         float h = Input.GetAxisRaw("Horizontal");
         float v = Input.GetAxisRaw("Vertical");

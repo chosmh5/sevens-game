@@ -64,7 +64,6 @@ public class VillageCamera : MonoBehaviour
 
     // Touch 처리
     private int rotationTouchId = -1;
-    private Vector2 lastTouchPos;
     private bool isDragging = false;
 
     void Start()
@@ -165,58 +164,57 @@ public class VillageCamera : MonoBehaviour
 
     void HandleTouchInput()
     {
-        // 2손가락 핀치 줌
-        if (Input.touchCount == 2)
+        // 화면 왼쪽(이동 조이스틱) 영역. 이 영역 터치는 카메라가 무시한다.
+        float leftZone = Screen.width * 0.35f;
+
+        // 오른쪽(카메라) 영역 터치만 최대 2개 수집.
+        // → 왼손 조이스틱(이동)과 오른손 드래그(회전)를 '동시에' 쓸 수 있다.
+        int look0 = -1, look1 = -1;
+        for (int i = 0; i < Input.touchCount; i++)
+        {
+            if (Input.GetTouch(i).position.x <= leftZone) continue;   // 왼쪽=조이스틱 → 제외
+            if (look0 == -1) look0 = i;
+            else { look1 = i; break; }
+        }
+
+        // 오른쪽에 두 손가락 → 핀치 줌
+        if (look0 != -1 && look1 != -1)
         {
             rotationTouchId = -1;
             isDragging = false;
 
-            Touch t0 = Input.GetTouch(0);
-            Touch t1 = Input.GetTouch(1);
-
-            float prevDist = ((t0.position - t0.deltaPosition) - (t1.position - t1.deltaPosition)).magnitude;
-            float currDist = (t0.position - t1.position).magnitude;
-            float delta = prevDist - currDist;
-
-            targetDistance += delta * pinchSensitivity;
+            Touch a = Input.GetTouch(look0);
+            Touch b = Input.GetTouch(look1);
+            float prevDist = ((a.position - a.deltaPosition) - (b.position - b.deltaPosition)).magnitude;
+            float currDist = (a.position - b.position).magnitude;
+            targetDistance += (prevDist - currDist) * pinchSensitivity;
             targetDistance = Mathf.Clamp(targetDistance, minDistance, maxDistance);
             return;
         }
 
-        // 1손가락 드래그 회전 (화면 오른쪽 절반만)
-        if (Input.touchCount == 1)
+        // 오른쪽에 한 손가락 → 카메라 회전 (왼쪽 조이스틱 이동과 동시 동작)
+        if (look0 != -1)
         {
-            Touch touch = Input.GetTouch(0);
-
-            if (touch.phase == TouchPhase.Began)
+            Touch touch = Input.GetTouch(look0);
+            if (isDragging && touch.fingerId == rotationTouchId)
             {
-                // 화면 오른쪽 절반에서만 카메라 회전 (왼쪽은 조이스틱)
-                if (touch.position.x > Screen.width * 0.35f)
-                {
-                    rotationTouchId = touch.fingerId;
-                    lastTouchPos = touch.position;
-                    isDragging = true;
-                }
+                Vector2 delta = touch.deltaPosition;
+                currentYaw   += delta.x * touchSensitivity;
+                currentPitch -= delta.y * touchSensitivity * 0.6f;
+                currentPitch  = Mathf.Clamp(currentPitch, minPitch, maxPitch);
             }
-            else if (isDragging && touch.fingerId == rotationTouchId)
+            else
             {
-                if (touch.phase == TouchPhase.Moved)
-                {
-                    Vector2 delta = touch.position - lastTouchPos;
-
-                    currentYaw += delta.x * touchSensitivity;
-                    currentPitch -= delta.y * touchSensitivity * 0.6f;
-                    currentPitch = Mathf.Clamp(currentPitch, minPitch, maxPitch);
-
-                    lastTouchPos = touch.position;
-                }
-                else if (touch.phase == TouchPhase.Ended || touch.phase == TouchPhase.Canceled)
-                {
-                    rotationTouchId = -1;
-                    isDragging = false;
-                }
+                // 새 회전 터치 시작 — 이 프레임엔 적용하지 않음(튐 방지)
+                rotationTouchId = touch.fingerId;
+                isDragging = true;
             }
+            return;
         }
+
+        // 오른쪽 터치 없음 → 회전 종료
+        rotationTouchId = -1;
+        isDragging = false;
     }
 
     /// <summary>

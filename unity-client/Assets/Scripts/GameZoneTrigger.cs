@@ -92,7 +92,7 @@ public class GameZoneTrigger : MonoBehaviour
     {
         _loading = false;
         _titleLabel.text = zoneName;
-        _bodyLabel.text  = promptMessage + $"\n\n[ Enter ] 시작   [ Esc ] 취소";
+        _bodyLabel.text  = promptMessage;
         _promptRoot.SetActive(true);
     }
 
@@ -163,10 +163,49 @@ public class GameZoneTrigger : MonoBehaviour
         var bBodyRT      = bodyGO.GetComponent<RectTransform>();
         bBodyRT.anchorMin = Vector2.zero;
         bBodyRT.anchorMax = Vector2.one;
-        bBodyRT.offsetMin = new Vector2(16f, 10f);
+        bBodyRT.offsetMin = new Vector2(16f, 60f);   // 하단 버튼 자리 확보
         bBodyRT.offsetMax = new Vector2(-16f, -50f);
 
+        // 탭 버튼(모바일) — 시작 / 취소. 키보드 Enter/Esc 도 그대로 동작.
+        MakeZoneButton(panel.transform, "시작", new Color(0.2f, 0.5f, 0.85f, 1f),
+                       new Vector2(-70f, 14f), () => { if (!_loading) StartCoroutine(StartGame()); });
+        MakeZoneButton(panel.transform, "취소", new Color(0.3f, 0.3f, 0.38f, 1f),
+                       new Vector2(70f, 14f), HidePrompt);
+
         _promptRoot.SetActive(false);
+    }
+
+    void MakeZoneButton(Transform parent, string text, Color bg, Vector2 anchoredPos,
+                        UnityEngine.Events.UnityAction onClick)
+    {
+        var go = new GameObject($"Btn_{text}");
+        go.transform.SetParent(parent, false);
+        var img = go.AddComponent<Image>();
+        img.color = bg;
+        var rt = go.GetComponent<RectTransform>();
+        rt.anchorMin = new Vector2(0.5f, 0f);
+        rt.anchorMax = new Vector2(0.5f, 0f);
+        rt.pivot     = new Vector2(0.5f, 0f);
+        rt.sizeDelta = new Vector2(120f, 40f);
+        rt.anchoredPosition = anchoredPos;
+
+        var btn = go.AddComponent<Button>();
+        btn.targetGraphic = img;
+        btn.onClick.AddListener(onClick);
+
+        var lblGO = new GameObject("Label");
+        lblGO.transform.SetParent(go.transform, false);
+        var tmp = lblGO.AddComponent<TextMeshProUGUI>();
+        tmp.text      = text;
+        tmp.fontSize  = 16f;
+        tmp.color     = Color.white;
+        tmp.fontStyle = FontStyles.Bold;
+        tmp.alignment = TextAlignmentOptions.Center;
+        var lrt = lblGO.GetComponent<RectTransform>();
+        lrt.anchorMin = Vector2.zero;
+        lrt.anchorMax = Vector2.one;
+        lrt.offsetMin = Vector2.zero;
+        lrt.offsetMax = Vector2.zero;
     }
 
     // ══════════════════════════════════════════════════════════════════

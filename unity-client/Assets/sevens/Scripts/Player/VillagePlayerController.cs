@@ -46,6 +46,7 @@ public class VillagePlayerController : MonoBehaviour
     private void Update()
     {
         if (isInteracting) return;
+        if (PlayerInteraction.Instance != null && PlayerInteraction.Instance.IsInteracting) return;
 
         HandleMovement();
         HandleInteraction();

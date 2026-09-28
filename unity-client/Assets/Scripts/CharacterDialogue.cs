@@ -28,16 +28,10 @@ public class CharacterDialogue : MonoBehaviour
 
     void Start()
     {
-        if (speechBubble == null)
-            CreateSpeechBubble();
-
-        bubbleGroup = speechBubble.GetComponent<CanvasGroup>();
-        if (bubbleGroup == null) bubbleGroup = speechBubble.AddComponent<CanvasGroup>();
-
-        speechBubble.SetActive(false);
-
+        // 말풍선 출력 완전 비활성화 — 모든 대사는 아래 대화 박스(PlayerInteraction)로만 표시한다.
+        // 혼잣말 루프(DialogueLoop)와 말풍선 생성을 둘 다 제거. 이 컴포넌트는 이제
+        // 캐릭터 이름 / InConversation 상태 / 근접 탐색 용도로만 쓰인다.
         ConversationManager.Instance?.Register(this);
-        StartCoroutine(DialogueLoop());
     }
 
     void LateUpdate()
@@ -105,6 +99,11 @@ public class CharacterDialogue : MonoBehaviour
 
             if (InConversation) continue;
 
+            // 플레이어가 대화/끼어들기/관전 중이면 혼잣말 호출을 멈춘다.
+            // → 7.8B를 계속 돌리는 부담을 없애 플레이어 응답 속도를 확보.
+            if (PlayerInteraction.Instance != null && PlayerInteraction.Instance.IsInteracting) continue;
+            if (ConversationWatchMode.IsWatching) continue;
+
             string line = null;
             yield return ServerClient.Instance.GetCharacterLine(
                 characterName,
@@ -119,11 +118,15 @@ public class CharacterDialogue : MonoBehaviour
 
     public IEnumerator SayLine(string line)
     {
-        yield return ShowDialogue(line);
+        // 말풍선 비활성화: 로그에만 남기고 화면 출력은 하지 않는다.
+        DialogueLog.Instance?.AddEntry(characterName, line);
+        yield break;
     }
 
     IEnumerator ShowDialogue(string line)
     {
+        if (speechBubble == null) yield break;   // 말풍선 비활성화 상태 — 안전 차단
+        DialogueLog.Instance?.AddEntry(characterName, line);
         dialogueText.text = line;
         speechBubble.SetActive(true);
 
