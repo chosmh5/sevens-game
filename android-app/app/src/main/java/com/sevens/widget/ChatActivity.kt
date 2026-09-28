@@ -61,7 +61,7 @@ fun ChatScreen() {
                 .padding(16.dp),
             contentAlignment = Alignment.Center
         ) {
-            Text("세비-호 [NEW]", color = ACCENT, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Text("대화", color = ACCENT, fontSize = 18.sp, fontWeight = FontWeight.Bold)
             TextButton(
                 onClick = {
                     scope.launch {
