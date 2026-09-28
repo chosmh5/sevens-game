@@ -34,3 +34,33 @@ android-app/.gradle/
 android-app/app/build/
 android-app/build/
 android-app/local.properties
+
+# ── 로컬 도구/에디터 ──
+.claude/
+android-app/.kotlin/
+
+# ── Unity 임시·복구 파일 ──
+unity-client/.utmp/
+unity-client/Assets/_Recovery/
+unity-client/Assets/_Recovery.meta
+
+# ── 서버 런타임 데이터 (실행 시 자동 생성) ──
+server/data.json
+my_ip.txt
+
+# ── 에셋스토어 패키지 ──
+# Asset Store EULA상 공개 저장소에 재배포할 수 없어 제외. README의 목록을 보고 각자 임포트.
+unity-client/Assets/WorldSpaceTransitions/
+unity-client/Assets/WorldSpaceTransitions.meta
+unity-client/Assets/Polytope Studio/
+unity-client/Assets/Polytope Studio.meta
+unity-client/Assets/BrokenVector/
+unity-client/Assets/BrokenVector.meta
+unity-client/Assets/Suggo Creations/
+unity-client/Assets/Suggo Creations.meta
+unity-client/Assets/sevens/AutoMobileColorGrading/
+unity-client/Assets/sevens/AutoMobileColorGrading.meta
+
+# ── 임시: 133MB 정적 폰트 아틀라스 (GitHub 100MB 제한 초과) ──
+# Unity에서 Tools > Sevens > 폰트 Dynamic 변환 실행 후 이 줄을 지우고 커밋할 것.
+unity-client/Assets/TextMesh Pro/Fonts/Noto_Sans_KR/static/NotoSansKR-Regular SDF.asset
