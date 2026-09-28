@@ -35,4 +35,16 @@ public static class AiDifficultySettings
             if (!_loaded)
             {
                 _selected = (AiDifficulty)PlayerPrefs.GetInt(PrefKey, (int)AiDifficulty.Normal);
-                _loaded   = true
+                _loaded   = true;
+            }
+            return _selected;
+        }
+        set
+        {
+            _selected = value;
+            _loaded   = true;
+            PlayerPrefs.SetInt(PrefKey, (int)value);
+            PlayerPrefs.Save();
+        }
+    }
+}

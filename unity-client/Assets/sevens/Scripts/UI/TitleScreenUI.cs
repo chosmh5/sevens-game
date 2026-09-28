@@ -17,6 +17,21 @@ public class TitleScreenUI : MonoBehaviour
     [SerializeField] private Button myWorldButton;
     [SerializeField] private Button sevensGameButton;
 
+    // ── AI 난이도 팝업 ──────────────────────────────────────
+    [Header("AI Difficulty Popup")]
+    [Tooltip("'세븐즈 게임'을 누르면 표시되는 난이도 선택 팝업. 비어 있으면 바로 게임 진입.")]
+    [SerializeField] private GameObject difficultyPanel;
+    [Tooltip("팝업 안의 '시작' 버튼 → 선택한 난이도로 카드게임 진입.")]
+    [SerializeField] private Button startGameButton;
+    [Tooltip("팝업 닫기/취소 버튼(선택).")]
+    [SerializeField] private Button difficultyCancelButton;
+    [Tooltip("Easy / Normal / Hard 순서로 3개 버튼을 연결.")]
+    [SerializeField] private Button[] difficultyButtons; // [0]=Easy [1]=Normal [2]=Hard
+    [Tooltip("선택된 난이도 버튼 강조용. difficultyButtons와 같은 순서.")]
+    [SerializeField] private Image[] difficultyHighlights;
+    [SerializeField] private Color difficultyNormalColor   = new Color(1f, 1f, 1f, 0.20f);
+    [SerializeField] private Color difficultySelectedColor = new Color(0.95f, 0.75f, 0.20f, 0.95f);
+
     // ── 연출 / 애니메이션 ──────────────────────────────────
     [Header("Intro Animation")]
     [SerializeField] private CanvasGroup rightPanelGroup;   // 우측 패널 페이드용
@@ -44,6 +59,9 @@ public class TitleScreenUI : MonoBehaviour
         // 버튼 이벤트 등록
         myWorldButton?  .onClick.AddListener(OnMyWorldClicked);
         sevensGameButton?.onClick.AddListener(OnSevensGameClicked);
+
+        // 난이도 팝업 초기화
+        SetupDifficultyPopup();
 
         // 텍스트 줄바꿈 방지 (TMP 기본값이 wordWrapping=true라 좁은 화면에서 깨짐)
         FixTextWrapping();
@@ -145,7 +163,67 @@ public class TitleScreenUI : MonoBehaviour
     private void OnSevensGameClicked()
     {
         if (_isTransitioning) return;
-        // 세븐즈 카드게임 씬으로 이동
+
+        // 난이도 팝업이 있으면 먼저 띄우고, 없으면 바로 카드게임 진입(하위 호환).
+        if (difficultyPanel != null)
+            OpenDifficultyPanel();
+        else
+            LoadScene(GameSceneManager.Scenes.CardGame);
+    }
+
+    // ── AI 난이도 팝업 ────────────────────────────────────────
+    private void SetupDifficultyPopup()
+    {
+        if (difficultyButtons != null)
+        {
+            for (int i = 0; i < difficultyButtons.Length; i++)
+            {
+                int idx = i; // 클로저 캡처 방지
+                difficultyButtons[i]?.onClick.AddListener(() => SetDifficulty(idx));
+            }
+        }
+        startGameButton?.onClick.AddListener(OnConfirmStart);
+        difficultyCancelButton?.onClick.AddListener(CloseDifficultyPanel);
+
+        if (difficultyPanel != null) difficultyPanel.SetActive(false);
+        RefreshDifficultyHighlight();
+    }
+
+    private void OpenDifficultyPanel()
+    {
+        RefreshDifficultyHighlight();
+        difficultyPanel.SetActive(true);
+    }
+
+    private void CloseDifficultyPanel()
+    {
+        if (difficultyPanel != null) difficultyPanel.SetActive(false);
+    }
+
+    /// <summary>난이도 선택(0=Easy, 1=Normal, 2=Hard).</summary>
+    public void SetDifficulty(int difficulty)
+    {
+        AiDifficultySettings.Selected = (AiDifficulty)difficulty;
+        RefreshDifficultyHighlight();
+    }
+
+    private void RefreshDifficultyHighlight()
+    {
+        if (difficultyHighlights == null) return;
+        int selected = (int)AiDifficultySettings.Selected;
+        for (int i = 0; i < difficultyHighlights.Length; i++)
+        {
+            if (difficultyHighlights[i] == null) continue;
+            difficultyHighlights[i].color = (i == selected)
+                ? difficultySelectedColor
+                : difficultyNormalColor;
+        }
+    }
+
+    /// <summary>팝업의 '시작' 버튼 → 선택된 난이도로 카드게임 진입.</summary>
+    private void OnConfirmStart()
+    {
+        if (_isTransitioning) return;
         LoadScene(GameSceneManager.Scenes.CardGame);
     }
 
