@@ -44,6 +44,9 @@ unity-client/.utmp/
 unity-client/Assets/_Recovery/
 unity-client/Assets/_Recovery.meta
 
+# ── 폰트 변환 백업 (FontAssetDynamicConverter) ──
+unity-client/FontBackup/
+
 # ── 서버 런타임 데이터 (실행 시 자동 생성) ──
 server/data.json
 my_ip.txt
