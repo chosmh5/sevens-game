@@ -54,3 +54,37 @@ Asset Store EULA상 공개 저장소에 올릴 수 없어서 저장소에서 뺐
 | `Assets/BrokenVector` | Low Poly Tree Pack (Broken Vector) |
 | `Assets/Suggo Creations` | RETROWAVE SKIES Lite (Suggo Creations) |
 | `Assets/sevens/AutoMobileColorGrading` | Auto Mobile Color Grading (ALIyerEdon) |
+
+---
+
+## AI 모델 설정·벤치마크
+
+모델은 `server/main.py` 맨 위의 `MODEL_NAME`(대사), `JUDGE_MODEL`(판정)에서 바꾼다.
+환경변수 `SEVENS_MODEL`, `SEVENS_JUDGE_MODEL`로도 바꿀 수 있다. 둘을 같은 모델로 두면 메모리에 하나만 올라간다.
+
+| 설정 | 기본값 | 설명 |
+|---|---|---|
+| `SEVENS_FAST` | `1` | 빠른 모드. NPC 대화 묶음·혼잣말·게임 반응을 LLM 1회 호출로 생성. `0`이면 예전 방식 |
+| `SEVENS_PREGEN` | `1` | 혼잣말을 빈 시간에 미리 만들어 둠. 플레이어가 말을 걸면 즉시 양보 |
+| `SEVENS_NUM_CTX` | `4096` | 컨텍스트 길이 |
+
+현재 설정과 호출 통계는 서버를 켠 뒤 `http://localhost:8000/llm/status`에서 볼 수 있다.
+
+### 후보 모델 비교
+
+```bash
+cd server
+python bench_models.py --pull     # 없는 후보는 받아서 측정 (uvicorn 서버는 끄고 실행)
+python bench_models.py --quick    # 빠르게 한 번
+```
+
+결과는 `server/bench_results/<시각>/report.html`에 저장된다(속도, 존댓말 준수, 외국어 혼입, JSON 성공률, 실제 대사 비교).
+
+### 서버 테스트 (Ollama 없이)
+
+```bash
+cd server
+pip install -r requirements.txt
+python tests/test_server.py fast
+python tests/test_server.py slow
+```

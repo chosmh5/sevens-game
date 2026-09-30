@@ -1,1 +1,5 @@
-
+fastapi
+uvicorn
+requests
+# 테스트(tests/test_server.py)용
+httpx

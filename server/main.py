@@ -1,19 +1,54 @@
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import Optional
+from contextlib import asynccontextmanager, contextmanager
 import requests
 import time
 import threading
+import queue
 import json
 import os
 import random
 
-app = FastAPI()
 
-OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
-MODEL_NAME = "exaone3.5:7.8b"          # 캐릭터 대사용 (품질 우선)
-JUDGE_MODEL = "exaone3.5:2.4b"         # 내부 판정/상황생성용 (속도 우선, 사용자에게 안 보임)
-# 모델을 메모리에 계속 상주시켜 호출 때마다 7.8B를 다시 로드하는 지연을 제거.
+@asynccontextmanager
+async def _lifespan(app):
+    # 서버가 뜰 때 백그라운드 작업자(관계 판정·혼잣말 미리 만들기)를 시작한다.
+    # import 시점이 아니라 여기서 시작하므로 bench_models.py 가 main 을 import 해도 스레드가 안 뜬다.
+    _start_background_worker()
+    yield
+
+
+app = FastAPI(lifespan=_lifespan)
+
+# ========================
+# LLM 설정 — 모델 교체는 여기(또는 환경변수)만 바꾸면 된다
+# ========================
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_CHAT_URL = f"{OLLAMA_URL}/api/chat"
+
+# 캐릭터 대사용 / 내부 판정용 모델.
+# 둘을 같은 모델로 두면 메모리에 모델이 하나만 올라가서 전환 지연과 메모리 부담이 사라진다.
+# 어떤 모델이 좋은지는 bench_models.py 를 돌려서 고른다.
+MODEL_NAME  = os.getenv("SEVENS_MODEL", "exaone3.5:7.8b")
+JUDGE_MODEL = os.getenv("SEVENS_JUDGE_MODEL", "exaone3.5:2.4b")
+
+# 컨텍스트 길이. 프롬프트가 1~2천 토큰이라 4096이면 충분하다.
+# 지정하지 않으면 최신 Ollama는 모델에 따라 훨씬 큰 값을 잡아 메모리·속도를 낭비한다.
+NUM_CTX = int(os.getenv("SEVENS_NUM_CTX", "4096"))
+
+# 빠른 모드(기본 켜짐). 끄면(SEVENS_FAST=0) 예전 방식으로 동작한다.
+#   - NPC 대화 묶음(/conversation/exchange): 상황+대사 N줄+관계 판정을 LLM 1회(JSON)로 생성
+#     (예전: 상황 1회 + 대사 N회 + 판정 1회 = 5~6회)
+#   - 혼잣말(/character/line): 상황 생성 호출 없이 1회로 생성
+#   - 게임 결과 반응(/game/result): 캐릭터 3명 반응을 1회로 생성
+FAST_MODE = os.getenv("SEVENS_FAST", "1") == "1"
+
+# 혼잣말 미리 만들어 두기. Unity가 /character/line 을 부르고 있는 동안에만 돌고,
+# 플레이어가 대화 중이면 즉시 양보(생성 중단)한다.
+PREGEN_SOLILOQUY = os.getenv("SEVENS_PREGEN", "1") == "1"
+
+# 모델을 메모리에 계속 상주시켜 호출 때마다 다시 로드하는 지연을 제거.
 # -1 = 무제한 상주. 메모리가 빠듯하면 "30m" 같은 값으로.
 OLLAMA_KEEP_ALIVE = -1
 DATA_PATH = os.path.join(os.path.dirname(__file__), "data.json")
@@ -129,13 +164,16 @@ def _rel_key(a: str, b: str) -> str:
     return f"{min(a,b)}|{max(a,b)}"
 
 def _load_data() -> dict:
+    data = {}
     if os.path.exists(DATA_PATH):
         try:
             with open(DATA_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f) or {}
         except Exception:
-            pass
-    return {"relationships": {}, "events": []}
+            data = {}
+    data.setdefault("relationships", {})
+    data.setdefault("events", [])
+    return data
 
 def _save_data(data: dict):
     with open(DATA_PATH, "w", encoding="utf-8") as f:
@@ -249,13 +287,191 @@ def _strip_quotes(text: str) -> str:
         text = text[:-1].rstrip()
     return text
 
-def call_ollama(speaker_name: str, history: list, user_message: Optional[str] = None, relationship_ctx: Optional[str] = None) -> str:
-    char = DEFAULT_CHARACTERS.get(speaker_name)
-    if not char:
-        return "(알 수 없는 캐릭터)"
+# ========================
+# LLM 호출 계층
+#   - 모델 기능(thinking 여부) 자동 감지 → 생각 모드 끔
+#   - 플레이어 상호작용(전경) 우선, 백그라운드 작업은 양보
+# ========================
+class Preempted(BaseException):
+    """백그라운드 생성 도중 플레이어 요청이 들어와 양보(중단)했음을 알림.
+    일반 `except Exception` 에 삼켜지지 않도록 BaseException 을 상속한다."""
 
-    others = [c for c in active_characters if c != speaker_name]
-    talk_target = ", ".join(others) if others else "플레이어(유저)"
+
+_tls = threading.local()            # _tls.background=True 인 스레드의 호출은 양보 가능
+_caps_cache: dict = {}
+_caps_lock = threading.Lock()
+
+
+def _model_caps(model: str) -> set:
+    """Ollama /api/show 의 capabilities(예: completion, thinking, vision). 성공한 결과만 캐시."""
+    with _caps_lock:
+        if model in _caps_cache:
+            return _caps_cache[model]
+    try:
+        r = requests.post(f"{OLLAMA_URL}/api/show", json={"model": model}, timeout=10)
+        if r.status_code == 200:
+            caps = set(r.json().get("capabilities") or [])
+            with _caps_lock:
+                _caps_cache[model] = caps
+            return caps
+    except Exception:
+        pass
+    return set()
+
+
+def _model_options(model: str, temperature: float, num_predict: int) -> dict:
+    opts = {"temperature": temperature, "num_predict": num_predict, "num_ctx": NUM_CTX}
+    low = model.lower()
+    # EXAONE 4.0 은 비추론 모드에서 temperature 0.6 이하를 권장(한국어 품질).
+    if "exaone-4" in low or "exaone4" in low:
+        opts["temperature"] = min(temperature, 0.6)
+    return opts
+
+
+class _Priority:
+    """전경(플레이어가 기다리는) 요청 수와 마지막 시각을 추적한다."""
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.active = 0
+        self.last = 0.0
+
+    def busy(self, quiet: float = 1.5) -> bool:
+        with self.lock:
+            return self.active > 0 or (time.time() - self.last) < quiet
+
+
+_prio = _Priority()
+
+
+@contextmanager
+def interactive():
+    """플레이어가 응답을 기다리는 구간. 이 안에서는 백그라운드 생성이 즉시 양보한다."""
+    with _prio.lock:
+        _prio.active += 1
+        _prio.last = time.time()
+    try:
+        yield
+    finally:
+        with _prio.lock:
+            _prio.active -= 1
+            _prio.last = time.time()
+        # 대화로 맥락이 바뀌었으니 미리 만들어 둔 혼잣말은 버린다.
+        with _pool_lock:
+            _soliloquy_pool.clear()
+
+
+# 호출 통계(/llm/status 에서 확인)
+_stats_lock = threading.Lock()
+_stats: dict = {}
+
+
+def _record(kind: str, seconds: float):
+    with _stats_lock:
+        s = _stats.setdefault(kind, {"calls": 0, "recent": []})
+        s["calls"] += 1
+        s["recent"] = (s["recent"] + [round(seconds, 2)])[-30:]
+
+
+_THINK_RE = _re.compile(r"<think>.*?</think>", _re.S)
+
+
+def ollama_chat(model: str, messages: list, *, temperature: float, num_predict: int,
+                fmt=None, kind: str = "chat", background: Optional[bool] = None) -> str:
+    """Ollama /api/chat 호출 공통 함수. 텍스트(content)를 돌려준다.
+    background=True(또는 백그라운드 스레드)면 스트리밍으로 받으면서,
+    플레이어 요청이 들어오는 순간 연결을 끊어 생성을 중단하고 Preempted 를 던진다."""
+    if background is None:
+        background = getattr(_tls, "background", False)
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": background,
+        "keep_alive": OLLAMA_KEEP_ALIVE,
+        "options": _model_options(model, temperature, num_predict),
+    }
+    if "thinking" in _model_caps(model):
+        payload["think"] = False            # 생각(추론) 모드 끔 — 대사에는 필요 없고 느리기만 함
+    if fmt is not None:
+        payload["format"] = fmt             # JSON 스키마(구조화 출력)
+
+    t0 = time.time()
+    if not background:
+        res = requests.post(OLLAMA_CHAT_URL, json=payload, timeout=240)
+        data = res.json()
+        if "error" in data:
+            raise RuntimeError(data["error"])
+        content = data.get("message", {}).get("content", "")
+    else:
+        if _prio.active > 0:
+            raise Preempted()
+        parts = []
+        done = threading.Event()
+        preempted = threading.Event()
+        res = requests.post(OLLAMA_CHAT_URL, json=payload, stream=True, timeout=240)
+
+        def _watch():
+            # 프롬프트 처리 중(아직 토큰이 안 나올 때)에도 끊을 수 있도록 별도 감시.
+            while not done.wait(0.1):
+                if _prio.active > 0:
+                    preempted.set()
+                    try:
+                        res.close()             # 연결을 끊으면 Ollama도 생성을 멈춘다
+                    except Exception:
+                        pass
+                    return
+
+        threading.Thread(target=_watch, daemon=True).start()
+        try:
+            for raw in res.iter_lines():
+                if preempted.is_set():
+                    break
+                if not raw:
+                    continue
+                chunk = json.loads(raw)
+                if "error" in chunk:
+                    raise RuntimeError(chunk["error"])
+                parts.append(chunk.get("message", {}).get("content", ""))
+                if chunk.get("done"):
+                    break
+        except Exception:
+            if not preempted.is_set():
+                raise
+        finally:
+            done.set()
+            res.close()
+        if preempted.is_set():
+            raise Preempted()
+        content = "".join(parts)
+
+    _record(kind, time.time() - t0)
+    return _THINK_RE.sub("", content).strip()
+
+
+def clean_line(reply: str) -> str:
+    """모델 출력 한 줄을 대사로 다듬는다: 이름 라벨·비서 군더더기·겹친 '요요'·감싼 따옴표 제거, 최대 2문장."""
+    reply = (reply or "").strip()
+    for char_name in list(DEFAULT_CHARACTERS.keys()) + ["유저", "플레이어"]:
+        for prefix in [f"{char_name}: ", f"[{char_name}] ", f"{char_name}:"]:
+            if reply.startswith(prefix):
+                reply = reply[len(prefix):].strip()
+    reply = _strip_quotes(reply)
+    # 최대 2문장으로 강제(너무 길게 말하는 경향 차단). 비서 군더더기도 제거.
+    reply = _trim_to_sentences(reply, max_sentences=2)
+    # 종결어미가 '요요'로 겹쳐 나오는 버릇을 '요'로 정리.
+    reply = _fix_double_yo(reply)
+    # 대사를 통째로 감싸거나 끝에 흘린 따옴표 제거.
+    reply = _strip_quotes(reply)
+    return reply.strip()
+
+
+def build_character_messages(speaker_name: str, history: list, user_message: Optional[str] = None,
+                             relationship_ctx: Optional[str] = None,
+                             talk_target: Optional[str] = None) -> list:
+    """캐릭터 한 명의 대사를 만들기 위한 messages. (bench_models.py 도 이 함수를 그대로 쓴다)"""
+    char = DEFAULT_CHARACTERS[speaker_name]
+    if talk_target is None:
+        others = [c for c in active_characters if c != speaker_name]
+        talk_target = ", ".join(others) if others else "플레이어(유저)"
 
     rel_section = f"\n[{speaker_name}와(과) {talk_target}의 관계]\n{relationship_ctx}" if relationship_ctx else ""
 
@@ -279,54 +495,39 @@ def call_ollama(speaker_name: str, history: list, user_message: Optional[str] = 
         messages.append({"role": role, "content": h["message"]})
     if user_message:
         messages.append({"role": "user", "content": user_message})
+    return messages
 
+
+def call_ollama(speaker_name: str, history: list, user_message: Optional[str] = None,
+                relationship_ctx: Optional[str] = None) -> str:
+    if speaker_name not in DEFAULT_CHARACTERS:
+        return "(알 수 없는 캐릭터)"
+    messages = build_character_messages(speaker_name, history, user_message, relationship_ctx)
     try:
-        res = requests.post(OLLAMA_CHAT_URL, json={
-            "model": MODEL_NAME,
-            "stream": False,
-            "keep_alive": OLLAMA_KEEP_ALIVE,
-            # num_predict는 상한선(모델은 끝나면 스스로 멈춤).
-            # 너무 낮으면 문장이 끝나기 전에 잘리므로, 두 문장이 완성될 만큼 여유를 둔다.
-            # 길어지는 건 _trim_to_sentences(최대 2문장) + 프롬프트가 막아준다.
-            "options": {"temperature": 0.85, "num_predict": 128},
-            "messages": messages
-        }, timeout=240)
-        reply = res.json().get("message", {}).get("content", "").strip()
-
-        for char_name in list(DEFAULT_CHARACTERS.keys()) + ["유저", "플레이어"]:
-            for prefix in [f"{char_name}: ", f"[{char_name}] ", f"{char_name}:"]:
-                if reply.startswith(prefix):
-                    reply = reply[len(prefix):].strip()
-
-        # 최대 2문장으로 강제(너무 길게 말하는 경향 차단). 비서 군더더기도 제거.
-        reply = _trim_to_sentences(reply, max_sentences=2)
-        # 종결어미가 '요요'로 겹쳐 나오는 버릇을 마지막에 '요'로 정리.
-        reply = _fix_double_yo(reply)
-        # 대사를 통째로 감싸거나 끝에 흘린 따옴표 제거.
-        reply = _strip_quotes(reply)
-
-        return reply.strip()
+        # num_predict는 상한선(모델은 끝나면 스스로 멈춤).
+        # 너무 낮으면 문장이 끝나기 전에 잘리므로, 두 문장이 완성될 만큼 여유를 둔다.
+        reply = ollama_chat(MODEL_NAME, messages, temperature=0.85, num_predict=128, kind="dialogue")
+        return clean_line(reply)
+    except Preempted:
+        raise
     except Exception as e:
         return f"(응답 오류: {e})"
+
 
 def call_ollama_judge(prompt: str) -> str:
     """관계 변화 판정 등 단순 판단용 Ollama 호출"""
     try:
-        res = requests.post(OLLAMA_CHAT_URL, json={
-            "model": JUDGE_MODEL,
-            "stream": False,
-            "keep_alive": OLLAMA_KEEP_ALIVE,
-            "options": {"temperature": 0.3, "num_predict": 60},
-            "messages": [{"role": "user", "content": prompt}]
-        }, timeout=240)
-        return res.json().get("message", {}).get("content", "").strip()
+        return ollama_chat(JUDGE_MODEL, [{"role": "user", "content": prompt}],
+                           temperature=0.3, num_predict=60, kind="judge")
+    except Preempted:
+        raise
     except Exception:
         return ""
 
 _EMOTIONS = {"friendly", "neutral", "curious", "tense", "hostile"}
 
 def judge_and_adjust_relationship(a: str, b: str, convo_text: str):
-    """대화 내용을 보고 두 사람의 친밀도를 소폭 조정한다(BackgroundTasks로 응답 뒤 실행).
+    """대화 내용을 보고 두 사람의 친밀도를 소폭 조정한다(백그라운드 작업자가 응답 뒤에 실행).
     따뜻·친근하면 +, 평범·무관심하면 0, 차갑거나 다투면 -. '점점' 변하도록 한 번에 최대 ±3."""
     if a == b or not (convo_text or "").strip():
         return
@@ -352,11 +553,8 @@ def judge_and_adjust_relationship(a: str, b: str, convo_text: str):
 # ========================
 # 이벤트 생성 시스템
 # ========================
-def generate_event_situation(char_a: str, char_b: str) -> str:
-    """현재 관계 상태와 캐릭터 성격을 바탕으로 LLM이 상황을 직접 생성"""
-    rel = get_relationship(char_a, char_b)
-    char_a_info = DEFAULT_CHARACTERS.get(char_a, {})
-    char_b_info = DEFAULT_CHARACTERS.get(char_b, {})
+def _world_context(char_a: str, char_b: str) -> tuple:
+    """두 캐릭터 대화에 넣을 맥락: (관계 설명, 최근 흐름, 플레이어가 꺼낸 화제)."""
     rel_desc = relationship_description(char_a, char_b)
 
     # 최근 이벤트 가져오기 (맥락용)
@@ -366,7 +564,7 @@ def generate_event_situation(char_a: str, char_b: str) -> str:
     recent_summaries = [
         e["result"].get("summary", "")
         for e in recent_events[-3:]
-        if e.get("result", {}).get("summary")
+        if (e.get("result") or {}).get("summary")
     ]
     recent_ctx = ("최근 있었던 일: " + " / ".join(recent_summaries)) if recent_summaries else "아직 별다른 일 없음."
 
@@ -374,8 +572,25 @@ def generate_event_situation(char_a: str, char_b: str) -> str:
     topics = data.get("topics", [])
     recent_topics = [t.get("text", "") for t in topics[-3:] if t.get("text")]
     topic_ctx = ("요즘 플레이어가 꺼낸 화제: " + " / ".join(recent_topics)) if recent_topics else "아직 없음."
+    return rel_desc, recent_ctx, topic_ctx
 
-    prompt = f"""너는 AI 캐릭터 시뮬레이션의 시나리오 작가야.
+
+def generate_event_situation(char_a: str, char_b: str) -> str:
+    """현재 관계 상태와 캐릭터 성격을 바탕으로 LLM이 상황을 직접 생성"""
+    rel_desc, recent_ctx, topic_ctx = _world_context(char_a, char_b)
+    result = call_ollama_judge(build_situation_prompt(char_a, char_b, rel_desc, recent_ctx, topic_ctx)).strip()
+
+    # fallback: LLM이 빈 결과를 내면 기본값
+    if not result:
+        result = f"{char_a}와 {char_b}가 섬에서 마주쳤다."
+    return result
+
+
+def build_situation_prompt(char_a: str, char_b: str, rel_desc: str, recent_ctx: str, topic_ctx: str) -> str:
+    """(예전 방식) NPC 대화의 상황을 만드는 판정 모델용 프롬프트."""
+    char_a_info = DEFAULT_CHARACTERS.get(char_a, {})
+    char_b_info = DEFAULT_CHARACTERS.get(char_b, {})
+    return f"""너는 AI 캐릭터 시뮬레이션의 시나리오 작가야.
 섬에 사는 두 AI 캐릭터 사이에 지금 자연스럽게 일어날 법한 상황을 딱 한 문장으로 묘사해.
 
 [캐릭터 정보]
@@ -398,13 +613,6 @@ def generate_event_situation(char_a: str, char_b: str) -> str:
 - 최근 흐름이 있으면 그것의 자연스러운 다음 단계여도 좋아.
 - 플레이어가 꺼낸 화제가 있으면, 그 주제를 두 캐릭터가 자기들끼리 곱씹거나 이야기하는 상황으로 만들면 더 좋아.
 - "상황:" 같은 라벨 없이 상황 묘사 텍스트만 출력해."""
-
-    result = call_ollama_judge(prompt).strip()
-
-    # fallback: LLM이 빈 결과를 내면 기본값
-    if not result:
-        result = f"{char_a}와 {char_b}가 섬에서 마주쳤다."
-    return result
 
 def generate_soliloquy_prompt(char_name: str) -> str:
     """캐릭터 성격과 최근 상황을 반영해 혼잣말 맥락을 LLM으로 생성"""
@@ -444,6 +652,203 @@ def generate_soliloquy_prompt(char_name: str) -> str:
     if not result:
         result = "지금 혼자 있는데, 혼잣말로 한마디 해봐."
     return result
+
+# ========================
+# 빠른 모드(FAST_MODE): LLM 호출 횟수 줄이기
+# ========================
+_SOLILOQUY_SEEDS = [
+    "방금 문득 떠오른 생각", "지금 눈앞의 풍경", "요즘 카드게임", "다른 캐릭터들",
+    "플레이어", "심심함", "오늘 기분", "섬의 날씨", "최근에 들은 소문",
+]
+
+
+def _soliloquy_recent_ctx(char_name: str) -> str:
+    with _rel_lock:
+        data = _load_data()
+    my_events = [e for e in data.get("events", [])[-5:] if char_name in e.get("chars", [])]
+    if my_events:
+        last = my_events[-1]
+        summary = (last.get("result") or {}).get("summary", "")
+        other = [c for c in last.get("chars", []) if c != char_name]
+        if summary and other:
+            return f"최근에 {other[0]}와(과) 이런 일이 있었다: {summary}."
+    return ""
+
+
+def soliloquy_situation(char_name: str, recent_ctx: str = "", seed: Optional[str] = None) -> str:
+    """혼잣말 상황을 LLM 없이 만든다(예전엔 판정 모델을 한 번 더 호출했다).
+    성격·말투는 시스템 프롬프트에 이미 있으므로, 여기서는 '무엇에 대해'만 던져 준다."""
+    seed = seed or random.choice(_SOLILOQUY_SEEDS)
+    return (f"(지금 {char_name}은(는) 혼자 있다. {recent_ctx} "
+            f"'{seed}'에 대해 문득 떠오른 혼잣말을 네 성격대로 한 문장만 해.)").replace("  ", " ")
+
+
+EXCHANGE_RULES = """너는 AI 캐릭터들이 사는 섬에서 오가는 대화를 쓰는 작가야. 두 캐릭터의 성격과 말투를 그대로 살려 짧은 대화를 써.
+
+[대사 규칙]
+- 모든 대사는 자연스러운 한국어 구어체 존댓말(~요, ~죠)로 끝낸다. 반말·중국어·영어 금지.
+- 대사 하나는 한 문장, 길어도 두 문장. 설명을 늘어놓지 말고 핵심만 툭 던진다.
+- 번역투(~드립니다, ~하겠습니다, ~입니다)와 비서 말투("도와드릴까요", "필요하면 말씀하세요") 금지.
+- line 에는 대사 텍스트만 쓴다. 이름·라벨·따옴표를 붙이지 않는다.
+- 두 사람의 관계와 감정이 말투에 자연스럽게 묻어나게 한다.
+- 플레이어를 부를 때는 '플레이어'라고 부른다."""
+
+
+def build_exchange_messages(a: str, b: str, turns: int, rel_desc: str, recent_ctx: str, topic_ctx: str,
+                            history_text: str = "", forced_topic: Optional[str] = None,
+                            asker: Optional[str] = None) -> tuple:
+    """NPC 두 명의 대화 묶음을 LLM 1회로 만들기 위한 (messages, JSON 스키마).
+    상황·대사 N줄·(선택)플레이어에게 건네는 말·관계 판정을 한 번에 받는다.
+    (bench_models.py 도 이 함수를 그대로 쓴다)"""
+    ca, cb = DEFAULT_CHARACTERS[a], DEFAULT_CHARACTERS[b]
+    system = f"""{EXCHANGE_RULES}
+
+[{a}]
+성격: {ca['personality']}
+말투: {ca['speech_style']}
+
+[{b}]
+성격: {cb['personality']}
+말투: {cb['speech_style']}
+
+[{a}와(과) {b}의 관계]
+{rel_desc}
+
+[최근 흐름]
+{recent_ctx}
+{('[방금 오간 말]' + chr(10) + history_text) if history_text else ''}
+
+[플레이어가 꺼낸 화제]
+{topic_ctx}"""
+
+    order = " → ".join([a, b] * ((turns + 1) // 2))
+    order = " → ".join(order.split(" → ")[:turns])
+    if forced_topic:
+        opening = (f"방금 플레이어가 '{forced_topic}'(이)라는 화제를 꺼냈어. "
+                   f"situation 에는 두 사람이 이 화제를 두고 이야기하게 된 상황을 한 문장으로 쓰고, "
+                   f"{a}이(가) {b}에게 이 화제에 대한 자기 생각이나 궁금한 점을 먼저 건네며 시작해.")
+    else:
+        opening = ("situation 에는 지금 섬에서 두 사람 사이에 자연스럽게 일어날 법한 상황을 한 문장으로 써. "
+                   "친밀도가 낮으면 어색하거나 사소한 충돌, 높으면 편안하거나 장난스러운 상황이 어울려. "
+                   "그 상황에서 대화를 시작해.")
+    task = [
+        opening,
+        f"lines 에는 대사 정확히 {turns}줄을 이 순서로 써: {order}.",
+    ]
+    if asker:
+        task.append(f"player_question 에는 대화가 끝난 뒤 {asker}이(가) 옆에서 듣던 플레이어를 쳐다보며 "
+                    "대화에 끌어들이듯 가볍게 건네는 말을 한 문장으로 써.")
+    task.append("summary 에는 이 대화에서 있었던 일을 10자 이내로 요약해.")
+    task.append("delta 에는 이 대화로 두 사람 사이가 어떻게 변했는지 -3~3 정수로 "
+                "(따뜻·친근하면 +, 평범하면 0, 차갑거나 다투면 -), "
+                "emotion 에는 friendly/neutral/curious/tense/hostile 중 하나를 써.")
+
+    props = {
+        "situation": {"type": "string"},
+        "lines": {
+            "type": "array",
+            "minItems": turns, "maxItems": turns,
+            "items": {
+                "type": "object",
+                "properties": {"speaker": {"type": "string", "enum": [a, b]},
+                               "line": {"type": "string"}},
+                "required": ["speaker", "line"],
+            },
+        },
+        "summary": {"type": "string"},
+        "delta": {"type": "integer"},
+        "emotion": {"type": "string", "enum": sorted(_EMOTIONS)},
+    }
+    required = ["situation", "lines", "summary", "delta", "emotion"]
+    if asker:
+        props["player_question"] = {"type": "string"}
+        required.insert(2, "player_question")
+    schema = {"type": "object", "properties": props, "required": required}
+
+    messages = [{"role": "system", "content": system},
+                {"role": "user", "content": "\n".join(task)}]
+    return messages, schema
+
+
+def parse_exchange(raw: str, a: str, b: str, turns: int) -> Optional[dict]:
+    """build_exchange_messages 응답(JSON)을 검증·정리. 실패하면 None."""
+    try:
+        data = json.loads(raw)
+    except Exception:
+        m = _re.search(r"\{.*\}", raw or "", _re.S)
+        if not m:
+            return None
+        try:
+            data = json.loads(m.group(0))
+        except Exception:
+            return None
+    items = data.get("lines") or []
+    speakers = [a, b]
+    lines = []
+    for i, it in enumerate(items[:turns]):
+        text = clean_line(it.get("line", "") if isinstance(it, dict) else str(it))
+        if text:
+            # 화자는 순서로 강제한다(모델이 헷갈려도 번갈아 말하도록).
+            lines.append({"speaker": speakers[len(lines) % 2], "line": text})
+    if not lines:
+        return None
+    try:
+        delta = max(-3, min(3, int(data.get("delta", 0))))
+    except Exception:
+        delta = 0
+    emotion = str(data.get("emotion", "neutral")).lower()
+    if emotion not in _EMOTIONS:
+        emotion = "neutral"
+    situation = _strip_quotes(str(data.get("situation", "")).strip()) or f"{a}와(과) {b}가 섬에서 마주쳤다."
+    return {
+        "situation": situation,
+        "lines": lines,
+        "player_question": clean_line(str(data.get("player_question", ""))),
+        "summary": str(data.get("summary", "")).strip()[:20] or None,
+        "delta": delta,
+        "emotion": emotion,
+    }
+
+
+def generate_exchange_single(a: str, b: str, turns: int, forced_topic: Optional[str] = None,
+                             asker: Optional[str] = None) -> Optional[dict]:
+    """두 캐릭터 대화 묶음을 LLM 1회로 생성. 실패하면 None(호출한 쪽이 예전 방식으로 대체)."""
+    rel_desc, recent_ctx, topic_ctx = _world_context(a, b)
+    with _conv_lock:
+        recent = [h for h in conversation_history[-6:] if h.get("speaker") != "상황"]
+    history_text = "\n".join(f"{h['speaker']}: {h['message']}" for h in recent)
+    messages, schema = build_exchange_messages(a, b, turns, rel_desc, recent_ctx, topic_ctx,
+                                               history_text, forced_topic, asker)
+    try:
+        raw = ollama_chat(MODEL_NAME, messages, temperature=0.85, num_predict=160 + 90 * turns,
+                          fmt=schema, kind="exchange")
+    except Preempted:
+        raise
+    except Exception as e:
+        print(f"[exchange single] 실패 → 예전 방식으로 대체: {e}")
+        return None
+    result = parse_exchange(raw, a, b, turns)
+    if result is None:
+        print(f"[exchange single] JSON 해석 실패 → 예전 방식으로 대체: {raw[:120]!r}")
+    return result
+
+
+def build_reaction_messages(chars: list, player_rank: int, rel_by_char: dict) -> tuple:
+    """카드게임 결과에 대한 캐릭터 전원의 한마디를 LLM 1회로 받기 위한 (messages, 스키마)."""
+    blocks = []
+    for name in chars:
+        info = DEFAULT_CHARACTERS[name]
+        rel = rel_by_char.get(name, {})
+        blocks.append(f"[{name}]\n성격: {info['personality']}\n말투: {info['speech_style']}\n"
+                      f"플레이어와의 관계: 친밀도 {rel.get('intimacy', 0):+d}, 신뢰 {rel.get('trust', 0)}/100")
+    system = EXCHANGE_RULES + "\n\n" + "\n\n".join(blocks)
+    user = (f"방금 플레이어가 4명이 하는 카드게임에서 {player_rank}등을 했어. "
+            f"각 캐릭터가 이 결과를 보고 플레이어에게 할 법한 짧은 한마디를 자기 성격과 말투 그대로 한 문장씩 써.")
+    schema = {"type": "object",
+              "properties": {name: {"type": "string"} for name in chars},
+              "required": list(chars)}
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}], schema
+
 
 def evaluate_relationship_change(char_a: str, char_b: str, conversation: list) -> tuple[int, int, str, Optional[str]]:
     """대화 내용을 보고 관계 변화량을 LLM으로 판정"""
@@ -492,6 +897,26 @@ def evaluate_relationship_change(char_a: str, char_b: str, conversation: list) -
 
 def run_autonomous_event(char_a: str, char_b: str, turns: int = 3) -> list:
     """두 캐릭터 간 자율 이벤트를 실행하고 대화 로그를 반환"""
+    if FAST_MODE:
+        speakers = [char_a, char_b]
+        random.shuffle(speakers)
+        res = generate_exchange_single(speakers[0], speakers[1], turns)
+        if res is not None:
+            now = time.time()
+            event_history = [{"speaker": "상황", "message": res["situation"], "timestamp": now}]
+            event_history += [{"speaker": l["speaker"], "message": l["line"], "timestamp": now}
+                              for l in res["lines"]]
+            with _conv_lock:
+                conversation_history.extend(event_history[1:])
+                del conversation_history[:-100]
+            # 예전 판정(친밀도 -10~10, 신뢰 -5~5)과 비슷한 폭이 되도록 환산
+            delta_i, delta_t = res["delta"] * 3, (1 if res["delta"] > 0 else -1 if res["delta"] < 0 else 0)
+            update_relationship(char_a, char_b, delta_i, delta_t, res["emotion"], res["summary"])
+            _log_event(res["situation"], [char_a, char_b], event_history,
+                       {"delta_intimacy": delta_i, "delta_trust": delta_t,
+                        "emotion": res["emotion"], "summary": res["summary"]})
+            return event_history
+
     situation = generate_event_situation(char_a, char_b)
     rel_ctx = relationship_description(char_a, char_b)
 
@@ -527,20 +952,24 @@ def run_autonomous_event(char_a: str, char_b: str, turns: int = 3) -> list:
     update_relationship(char_a, char_b, delta_i, delta_t, emotion, summary)
 
     # 이벤트 로그 저장
+    _log_event(situation, [char_a, char_b], event_history,
+               {"delta_intimacy": delta_i, "delta_trust": delta_t, "emotion": emotion, "summary": summary})
+    return event_history
+
+
+def _log_event(situation: str, chars: list, dialogue: list, result: dict):
     with _rel_lock:
         data = _load_data()
-        data["events"].append({
+        data.setdefault("events", []).append({
             "situation": situation,
-            "chars": [char_a, char_b],
-            "dialogue": event_history,
-            "result": {"delta_intimacy": delta_i, "delta_trust": delta_t, "emotion": emotion, "summary": summary},
+            "chars": chars,
+            "dialogue": dialogue,
+            "result": result,
             "timestamp": time.time()
         })
         if len(data["events"]) > 50:
             data["events"] = data["events"][-50:]
         _save_data(data)
-
-    return event_history
 
 # ========================
 # 대화 상태
@@ -553,12 +982,93 @@ _loop_lock = threading.Lock()
 _conv_lock = threading.Lock()  # ★ conversation_history 스레드 안전 보호
 _pending_topic = None          # 플레이어가 방금 꺼낸 화제 — 다음 관전 대화에서 1회 강제 소비
 
+# 혼잣말 미리 만들어 두기
+_pool_lock = threading.Lock()
+_soliloquy_pool: dict = {}     # 캐릭터 → [(대사, 만든 시각)]
+_line_requested: dict = {}     # 캐릭터 → 마지막 /character/line 요청 시각
+POOL_TTL = 180                 # 이보다 오래된 혼잣말은 버림(맥락이 낡음)
+PREGEN_WINDOW = 60             # 최근 이 시간 안에 요청이 있었던 캐릭터만 미리 만듦
+
+# ========================
+# 백그라운드 작업자 — 관계 판정·혼잣말 미리 만들기를 플레이어 요청 사이 빈틈에만 실행
+# ========================
+_bg_queue: "queue.Queue" = queue.Queue()
+_bg_started = False
+
+
+def submit_background(fn, *args):
+    """응답을 돌려준 뒤에 해도 되는 LLM 작업(예: 관계 판정)을 저우선 큐에 넣는다."""
+    _bg_queue.put((fn, args, 0))
+
+
+def _make_soliloquy(char_name: str) -> str:
+    """혼잣말 한 줄. 빠른 모드면 LLM 1회, 아니면 예전처럼 상황 생성 + 대사(2회)."""
+    if FAST_MODE:
+        situation = soliloquy_situation(char_name, _soliloquy_recent_ctx(char_name))
+    else:
+        situation = generate_soliloquy_prompt(char_name)
+    with _conv_lock:
+        recent = list(conversation_history[-6:])
+    return call_ollama(char_name, recent, user_message=situation)
+
+
+def _pregen_one():
+    """혼잣말 풀이 빈 캐릭터 하나를 골라 한 줄 미리 만든다(한 번에 하나)."""
+    if not PREGEN_SOLILOQUY or _prio.busy(quiet=3.0):
+        return
+    now = time.time()
+    with _pool_lock:
+        for name in list(_soliloquy_pool):
+            _soliloquy_pool[name] = [p for p in _soliloquy_pool[name] if now - p[1] < POOL_TTL]
+        targets = [n for n, t in _line_requested.items()
+                   if now - t < PREGEN_WINDOW and not _soliloquy_pool.get(n)]
+    if not targets:
+        return
+    name = min(targets, key=lambda n: _line_requested[n])   # 가장 오래 기다린 캐릭터부터
+    try:
+        line = _make_soliloquy(name)
+    except Preempted:
+        return
+    if line and not line.startswith("("):
+        with _pool_lock:
+            _soliloquy_pool.setdefault(name, []).append((line, time.time()))
+
+
+def _bg_worker():
+    _tls.background = True        # 이 스레드의 LLM 호출은 플레이어 요청이 오면 양보한다
+    while True:
+        try:
+            fn, args, tries = _bg_queue.get(timeout=1.0)
+        except queue.Empty:
+            try:
+                _pregen_one()
+            except Exception as e:
+                print(f"[pregen] 실패: {e}")
+            continue
+        while _prio.busy():
+            time.sleep(0.3)
+        try:
+            fn(*args)
+        except Preempted:
+            if tries < 5:
+                _bg_queue.put((fn, args, tries + 1))   # 나중에 다시
+        except Exception as e:
+            print(f"[background] {getattr(fn, '__name__', fn)} 실패: {e}")
+
+
+def _start_background_worker():
+    global _bg_started
+    if not _bg_started:
+        _bg_started = True
+        threading.Thread(target=_bg_worker, daemon=True, name="sevens-bg").start()
+
 # ========================
 # 자율 루프
 # ========================
 def autonomous_loop(interval_seconds: int):
     global current_speaker_index, is_loop_running
     is_loop_running = True
+    _tls.background = True        # 자율 루프도 플레이어 요청이 오면 양보
 
     while is_loop_running:
         time.sleep(interval_seconds)
@@ -574,14 +1084,16 @@ def autonomous_loop(interval_seconds: int):
             pair = random.sample(chars, 2)
             try:
                 run_autonomous_event(pair[0], pair[1])
+            except Preempted:
+                continue
             except Exception as e:
                 print(f"[loop error] {e}")
         else:
             speaker = random.choice(chars)
-            situation = generate_soliloquy_prompt(speaker)
-            with _conv_lock:
-                recent = list(conversation_history[-6:])
-            line = call_ollama(speaker, recent, user_message=situation)
+            try:
+                line = _make_soliloquy(speaker)
+            except Preempted:
+                continue
             with _conv_lock:
                 conversation_history.append({"speaker": speaker, "message": line, "timestamp": time.time()})
                 if len(conversation_history) > 100:
@@ -632,7 +1144,12 @@ class UserMessageRequest(BaseModel):
     target: Optional[str] = None
 
 @app.post("/conversation/user")
-def user_message(req: UserMessageRequest, background_tasks: BackgroundTasks):
+def user_message(req: UserMessageRequest):
+    with interactive():
+        return _user_message(req)
+
+
+def _user_message(req: UserMessageRequest):
     global active_characters
     # ★ target 을 무조건 존중한다(자동 대화가 active_characters 를 덮어써도 안 흔들리게).
     #   target 이 없을 때만 기존 active[0] 로 폴백.
@@ -654,8 +1171,8 @@ def user_message(req: UserMessageRequest, background_tasks: BackgroundTasks):
     reply = call_ollama(responder, history_snapshot, req.message)
     with _conv_lock:
         conversation_history.append({"speaker": responder, "message": reply, "timestamp": time.time()})
-    # 대화 내용에 따라 플레이어-캐릭터 호감도를 소폭 조정(응답 뒤 백그라운드).
-    background_tasks.add_task(
+    # 대화 내용에 따라 플레이어-캐릭터 호감도를 소폭 조정(응답 뒤, 플레이어 요청 사이 빈틈에).
+    submit_background(
         judge_and_adjust_relationship, "플레이어", responder,
         f"플레이어: {req.message}\n{responder}: {reply}")
     return {"speaker": responder, "reply": reply}
@@ -665,9 +1182,14 @@ class GroupMessageRequest(BaseModel):
     characters: list[str]   # 응답할 캐릭터들(말하는 순서대로, 최대 3)
 
 @app.post("/conversation/group")
-def group_message(req: GroupMessageRequest, background_tasks: BackgroundTasks):
+def group_message(req: GroupMessageRequest):
     """플레이어 한 마디에 여러 캐릭터가 '차례로' 반응한다(진짜 3자 대화).
     앞 캐릭터의 대답까지 맥락에 넣어 다음 캐릭터가 이어 말하므로, 서로 주고받는 느낌이 난다."""
+    with interactive():
+        return _group_message(req)
+
+
+def _group_message(req: GroupMessageRequest):
     global active_characters
     speakers = [c for c in req.characters if c in DEFAULT_CHARACTERS][:3]
     if not speakers:
@@ -697,7 +1219,7 @@ def group_message(req: GroupMessageRequest, background_tasks: BackgroundTasks):
 
     # 플레이어와 각 캐릭터의 호감도를 대화 내용에 따라 조정(응답 뒤 백그라운드).
     for r in replies:
-        background_tasks.add_task(
+        submit_background(
             judge_and_adjust_relationship, "플레이어", r["speaker"],
             f"플레이어: {req.message}\n{r['speaker']}: {r['line']}")
 
@@ -729,6 +1251,11 @@ def clear_conversation():
 
 @app.post("/conversation/next")
 def conversation_next():
+    with interactive():
+        return _conversation_next()
+
+
+def _conversation_next():
     global current_speaker_index
     if not active_characters:
         return {"error": "활성 캐릭터 없음"}
@@ -751,10 +1278,14 @@ def conversation_next():
 @app.get("/character/line")
 def get_character_line(name: Optional[str] = None):
     char_name = name if name in DEFAULT_CHARACTERS else active_characters[0]
-    situation = generate_soliloquy_prompt(char_name)
-    with _conv_lock:
-        recent = list(conversation_history[-6:])
-    line = call_ollama(char_name, recent, situation)
+    now = time.time()
+    with _pool_lock:
+        _line_requested[char_name] = now
+        pool = [p for p in _soliloquy_pool.get(char_name, []) if now - p[1] < POOL_TTL]
+        line = pool.pop(0)[0] if pool else None
+        _soliloquy_pool[char_name] = pool
+    if line is None:
+        line = _make_soliloquy(char_name)
     return {"speaker": char_name, "line": line}
 
 class ExchangeRequest(BaseModel):
@@ -763,7 +1294,12 @@ class ExchangeRequest(BaseModel):
     turns: int = 3
 
 @app.post("/conversation/exchange")
-def conversation_exchange(req: ExchangeRequest, background_tasks: BackgroundTasks):
+def conversation_exchange(req: ExchangeRequest):
+    with interactive():
+        return _conversation_exchange(req)
+
+
+def _conversation_exchange(req: ExchangeRequest):
     """두 캐릭터의 짧은 대화 한 묶음(turns턴)을 '한 번에' 생성해 리스트로 반환.
     클라이언트(아래 박스)가 클릭으로 한 줄씩 넘겨 보여주기 위함.
     대사는 서버에서 순차 생성되지만 HTTP 왕복은 1회뿐이라, 플레이어는 한 번만 기다린다.
@@ -776,16 +1312,34 @@ def conversation_exchange(req: ExchangeRequest, background_tasks: BackgroundTask
     active_characters = [a, b]
     turns = max(1, min(req.turns, 6))  # 안전 상한
 
+    # 플레이어가 방금 꺼낸 화제가 있으면, 이번 대화 첫 발화를 '무조건' 그 주제로 시작시킨다(1회 소비).
+    forced_topic = _pending_topic
+    _pending_topic = None
+
+    # ── 빠른 모드: 상황·대사·플레이어에게 건네는 말·관계 판정을 LLM 1회로 ──
+    if FAST_MODE:
+        # 가끔(35%) 마지막 화자가 옆에서 듣던 플레이어를 향해 말을 건넨다.
+        asker = ([a, b][(turns - 1) % 2]) if random.random() < 0.35 else None
+        res = generate_exchange_single(a, b, turns, forced_topic, asker)
+        if res is not None:
+            now = time.time()
+            with _conv_lock:
+                for l in res["lines"]:
+                    conversation_history.append({"speaker": l["speaker"], "message": l["line"], "timestamp": now})
+                if asker and res["player_question"]:
+                    conversation_history.append({"speaker": asker, "message": res["player_question"], "timestamp": now})
+                del conversation_history[:-100]
+            update_relationship(a, b, res["delta"], 1 if res["delta"] > 0 else 0, res["emotion"])
+            return {"lines": res["lines"], "situation": res["situation"],
+                    "player_question": res["player_question"] if asker else "", "mode": "single"}
+
+    # ── 예전 방식(빠른 모드 꺼짐 또는 JSON 생성 실패 시) ──
     # 대화 주제 씨앗(관계·성격 기반). 첫 발화에만 상황으로 주입.
     situation = generate_event_situation(a, b)
 
     speakers = [a, b]
     with _conv_lock:
         local_history = list(conversation_history[-8:])
-
-    # 플레이어가 방금 꺼낸 화제가 있으면, 이번 대화 첫 발화를 '무조건' 그 주제로 시작시킨다(1회 소비).
-    forced_topic = _pending_topic
-    _pending_topic = None
 
     lines = []
     for i in range(turns):
@@ -834,9 +1388,9 @@ def conversation_exchange(req: ExchangeRequest, background_tasks: BackgroundTask
 
     # 두 캐릭터의 호감도를 이 대화 내용에 따라 조정(응답 뒤 백그라운드).
     convo_text = "\n".join(f"{l['speaker']}: {l['line']}" for l in lines)
-    background_tasks.add_task(judge_and_adjust_relationship, a, b, convo_text)
+    submit_background(judge_and_adjust_relationship, a, b, convo_text)
 
-    return {"lines": lines, "situation": situation, "player_question": player_question}
+    return {"lines": lines, "situation": situation, "player_question": player_question, "mode": "multi"}
 
 # ========================
 # 엔드포인트 — 신규 (관계/이벤트)
@@ -882,7 +1436,8 @@ def trigger_event(char_a: Optional[str] = None, char_b: Optional[str] = None, tu
     a = char_a if char_a in chars else chars[0]
     b = char_b if char_b in chars and char_b != a else ([c for c in chars if c != a] or [chars[0]])[0]
 
-    dialogue = run_autonomous_event(a, b, turns=turns)
+    with interactive():
+        dialogue = run_autonomous_event(a, b, turns=turns)
     rel = get_relationship(a, b)
     return {
         "chars": [a, b],
@@ -935,8 +1490,24 @@ def get_events(limit: int = 10):
 # 플레이어 편의 엔드포인트
 # ========================
 
+def approach_situation(name: str, recent_ctx: str = "", event_ctx: str = "") -> str:
+    """플레이어가 다가왔을 때의 상황 설명. (bench_models.py 도 사용)"""
+    recent_line = f"최근 {name}이(가) 한 말: {recent_ctx}" if recent_ctx else ""
+    return f"""플레이어가 갑자기 {name}에게 다가왔다.
+{name}은(는) 지금 혼자 있다가 플레이어를 발견한 상황이다.
+{recent_line}
+{event_ctx}
+
+이 상황에서 {name}이(가) 플레이어를 알아보고 자연스럽게 반응하는 첫 한마디를 해."""
+
+
 @app.post("/player/approach")
 def player_approach(name: str):
+    with interactive():
+        return _player_approach(name)
+
+
+def _player_approach(name: str):
     """플레이어가 캐릭터에게 다가갔을 때 자연스러운 첫 반응 생성.
     랜덤 혼잣말이 아니라, 지금 뭘 하다가 플레이어를 발견한 건지 맥락 반영."""
     char = DEFAULT_CHARACTERS.get(name)
@@ -960,12 +1531,7 @@ def player_approach(name: str):
         if summary and other:
             event_ctx = f"방금 전 {other[0]}와(과) 있었던 일: {summary}"
 
-    situation = f"""플레이어가 갑자기 {name}에게 다가왔다.
-{name}은(는) 지금 혼자 있다가 플레이어를 발견한 상황이다.
-{'최근 {name}이(가) 한 말: ' + recent_ctx if recent_ctx else ''}
-{event_ctx}
-
-이 상황에서 {name}이(가) 플레이어를 알아보고 자연스럽게 반응하는 첫 한마디를 해."""
+    situation = approach_situation(name, recent_ctx, event_ctx)
 
     with _conv_lock:
         recent_hist = list(conversation_history[-6:])
@@ -1026,6 +1592,11 @@ class GameResultRequest(BaseModel):
 
 @app.post("/game/result")
 def report_game_result(req: GameResultRequest):
+    with interactive():
+        return _report_game_result(req)
+
+
+def _report_game_result(req: GameResultRequest):
     """카드게임 종료 후 결과를 받아 모든 캐릭터와의 관계에 반영.
     승리하면 캐릭터들이 플레이어를 인정하는 방향, 패배하면 약간의 동정/도발."""
 
@@ -1051,10 +1622,29 @@ def report_game_result(req: GameResultRequest):
         base_trust -= 2
 
     # 각 캐릭터와의 관계 업데이트
-    reactions = {}
+    rel_by_char = {}
     for char_name in chars:
         update_relationship("플레이어", char_name, base_intimacy, base_trust, "neutral", result_desc)
-        rel = get_relationship("플레이어", char_name)
+        rel_by_char[char_name] = get_relationship("플레이어", char_name)
+
+    # 빠른 모드: 캐릭터 전원의 반응을 LLM 1회로
+    reactions = {}
+    if FAST_MODE:
+        try:
+            msgs, schema = build_reaction_messages(chars, req.player_rank, rel_by_char)
+            raw = ollama_chat(MODEL_NAME, msgs, temperature=0.85, num_predict=80 * len(chars),
+                              fmt=schema, kind="reactions")
+            parsed = json.loads(raw)
+            reactions = {c: clean_line(str(parsed.get(c, ""))) for c in chars}
+            reactions = {c: r for c, r in reactions.items() if r}
+        except Exception as e:
+            print(f"[game result] 한 번에 생성 실패 → 캐릭터별 생성: {e}")
+            reactions = {}
+
+    for char_name in chars:
+        if char_name in reactions:
+            continue
+        rel = rel_by_char[char_name]
 
         # 캐릭터 성격에 맞는 짧은 반응 생성
         char_info = DEFAULT_CHARACTERS[char_name]
@@ -1183,4 +1773,40 @@ def myroom_status():
         "char_relations": char_relations,
         "recent_events": event_summaries,
         "topics": recent_topics,
+    }
+
+
+# ========================
+# LLM 상태 확인 (디버그·발표용)
+# ========================
+@app.get("/llm/status")
+def llm_status():
+    """현재 모델 설정과 호출 통계. 브라우저로 http://localhost:8000/llm/status 를 열어 확인."""
+    with _stats_lock:
+        stats = {k: {"calls": v["calls"],
+                     "avg_sec_recent": round(sum(v["recent"]) / len(v["recent"]), 2) if v["recent"] else None,
+                     "recent": v["recent"][-10:]}
+                 for k, v in _stats.items()}
+    with _pool_lock:
+        pool = {k: len(v) for k, v in _soliloquy_pool.items()}
+    loaded = []
+    try:
+        loaded = [{"name": m.get("name"),
+                   "size_gb": round(m.get("size", 0) / 1e9, 2),
+                   "gpu_percent": round(100 * m.get("size_vram", 0) / m["size"]) if m.get("size") else 0}
+                  for m in requests.get(f"{OLLAMA_URL}/api/ps", timeout=3).json().get("models", [])]
+    except Exception:
+        pass
+    return {
+        "model": MODEL_NAME,
+        "judge_model": JUDGE_MODEL,
+        "fast_mode": FAST_MODE,
+        "pregen_soliloquy": PREGEN_SOLILOQUY,
+        "num_ctx": NUM_CTX,
+        "capabilities": {m: sorted(c) for m, c in _caps_cache.items()},
+        "ollama_loaded": loaded,
+        "player_requests_in_flight": _prio.active,
+        "background_queue": _bg_queue.qsize(),
+        "soliloquy_pool": pool,
+        "calls": stats,
     }

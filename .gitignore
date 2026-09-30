@@ -49,6 +49,7 @@ unity-client/FontBackup/
 
 # ── 서버 런타임 데이터 (실행 시 자동 생성) ──
 server/data.json
+server/bench_results/
 my_ip.txt
 
 # ── 에셋스토어 패키지 ──
