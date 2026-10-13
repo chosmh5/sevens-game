@@ -1,5 +1,6 @@
 """main.py 동작 검증 — 가짜 Ollama(mock_ollama.py)를 띄우고 FastAPI TestClient 로 엔드포인트를 호출한다.
-실행(server 폴더에서): python tests/test_server.py [fast|slow]"""
+실행(server 폴더에서): python tests/test_server.py [fast|slow|full]
+  fast = 빠른 모드 + 압축 프롬프트(기본 설정), slow = 예전 호출 방식, full = 빠른 모드 + 예전 긴 프롬프트"""
 import os
 import sys
 import json
@@ -10,7 +11,9 @@ import threading
 MODE = sys.argv[1] if len(sys.argv) > 1 else "fast"
 PORT = 11499
 os.environ["OLLAMA_URL"] = f"http://127.0.0.1:{PORT}"
-os.environ["SEVENS_FAST"] = "1" if MODE == "fast" else "0"
+os.environ["SEVENS_FAST"] = "0" if MODE == "slow" else "1"
+os.environ["SEVENS_PROMPT"] = "full" if MODE == "full" else "compact"
+FAST = MODE in ("fast", "full")
 os.environ.setdefault("SEVENS_MODEL", "qwen3.5:4b")
 os.environ.setdefault("SEVENS_JUDGE_MODEL", "exaone3.5:2.4b")
 
@@ -57,7 +60,7 @@ def wait_for(pred, timeout=15):
 
 
 with TestClient(main.app) as c:
-    print(f"== mode={MODE}  FAST_MODE={main.FAST_MODE}")
+    print(f"== mode={MODE}  FAST_MODE={main.FAST_MODE}  PROMPT_STYLE={main.PROMPT_STYLE}")
 
     # 1) /conversation/exchange
     n = len(mock.LOG)
@@ -69,7 +72,7 @@ with TestClient(main.app) as c:
     check([l["speaker"] for l in r["lines"]] == ["세비-호", "류", "세비-호"], "speakers alternate a,b,a")
     check(all(l["line"] for l in r["lines"]), "lines non-empty")
     check("situation" in r and "player_question" in r, "response keeps Unity fields")
-    if MODE == "fast":
+    if FAST:
         check(len(ex_calls) == 1, "fast: exactly 1 LLM call for exchange")
         check(ex_calls[0].get("format") is not None, "fast: uses JSON schema format")
         check(ex_calls[0].get("think") is False, "qwen (thinking model) → think=false sent")
@@ -79,6 +82,14 @@ with TestClient(main.app) as c:
     else:
         check(len(ex_calls) >= 4, f"slow: legacy multi calls ({len(ex_calls)})")
 
+    if MODE == "fast":
+        sys_prompt = ex_calls[0]["messages"][0]["content"]
+        check("정체:" in sys_prompt and "성격:" not in sys_prompt, "compact: exchange uses character cards")
+        check("lines" in ex_calls[0]["format"]["properties"]
+              and ex_calls[0]["format"]["properties"]["lines"]["items"] == {"type": "string"},
+              "compact: lines are plain strings (no speaker objects)")
+        check("situation" not in ex_calls[0]["format"]["properties"], "compact: exchange skips situation")
+
     # 2) /conversation/user : 대사 1회 + 백그라운드 판정 1회(나중에)
     n = len(mock.LOG)
     r = c.post("/conversation/user", json={"message": "안녕하세요", "target": "류"}).json()
@@ -86,6 +97,10 @@ with TestClient(main.app) as c:
     check("필요한 게 있으면" not in r["reply"] and not r["reply"].startswith("세비-호"),
           f"clean_line strips filler/label: {r['reply']!r}")
     check(len(calls_since(n)) == 1, "user: 1 synchronous call")
+    if MODE == "fast":
+        um = calls_since(n)[0]
+        check(um["options"]["num_predict"] == 64, "compact: dialogue num_predict 64")
+        check(len([m for m in um["messages"] if m["role"] != "system"]) <= 5, "compact: history ≤ 4 + new message")
     got = wait_for(lambda: any(b["model"] == main.JUDGE_MODEL for b in calls_since(n)))
     check(got, "background judge ran after response")
     judge = [b for b in calls_since(n) if b["model"] == main.JUDGE_MODEL]
@@ -96,7 +111,7 @@ with TestClient(main.app) as c:
     n = len(mock.LOG)
     r = c.post("/game/result", json={"winner": "플레이어", "player_rank": 1}).json()
     check(set(r["reactions"]) == set(main.DEFAULT_CHARACTERS), "reactions for all characters")
-    if MODE == "fast":
+    if FAST:
         check(len(calls_since(n)) == 1, f"fast: game reactions in 1 call ({len(calls_since(n))})")
 
     # 4) /character/line + 미리 만들기
@@ -104,7 +119,7 @@ with TestClient(main.app) as c:
     n = len(mock.LOG)
     r = c.get("/character/line", params={"name": "진"}).json()
     first_calls = len(calls_since(n))
-    expected = 1 if MODE == "fast" else 2
+    expected = 1 if FAST else 2
     check(first_calls == expected, f"soliloquy sync calls = {first_calls} (expected {expected})")
     ok = wait_for(lambda: main._soliloquy_pool.get("진"), timeout=12)
     check(ok, "pregen filled pool for 진")
@@ -130,7 +145,7 @@ with TestClient(main.app) as c:
     mock.STATE["stream_delay"] = 0.0
 
     # 6) JSON 실패 → 예전 방식으로 대체
-    if MODE == "fast":
+    if FAST:
         mock.STATE["bad_json"] = True
         n = len(mock.LOG)
         r = c.post("/conversation/exchange", json={"char_a": "진", "char_b": "류", "turns": 2}).json()
@@ -155,7 +170,7 @@ with TestClient(main.app) as c:
         check(resp.status_code == 200, f"{method.upper()} {path} → {resp.status_code}")
     # 화제 강제 소비 확인
     r = c.post("/conversation/exchange", json={"char_a": "류", "char_b": "진", "turns": 3}).json()
-    if MODE == "fast":
+    if FAST:
         last = mock.LOG[-1]
         check("고양이" in last["messages"][1]["content"], "forced topic injected into exchange prompt")
 

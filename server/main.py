@@ -44,6 +44,12 @@ NUM_CTX = int(os.getenv("SEVENS_NUM_CTX", "4096"))
 #   - 게임 결과 반응(/game/result): 캐릭터 3명 반응을 1회로 생성
 FAST_MODE = os.getenv("SEVENS_FAST", "1") == "1"
 
+# 프롬프트 방식.
+#   compact(기본): 짧은 공통 규칙 + 캐릭터 카드(정체·말버릇·관계·예시) + 관계 한 줄 + 최근 대화 4줄
+#                  → 프롬프트 토큰이 약 1/3, 응답이 빨라지고 캐릭터 말투가 더 또렷해진다
+#   full         : 예전의 긴 규칙·성격·말투 설명
+PROMPT_STYLE = os.getenv("SEVENS_PROMPT", "compact")
+
 # 혼잣말 미리 만들어 두기. Unity가 /character/line 을 부르고 있는 동안에만 돌고,
 # 플레이어가 대화 중이면 즉시 양보(생성 중단)한다.
 PREGEN_SOLILOQUY = os.getenv("SEVENS_PREGEN", "1") == "1"
@@ -155,6 +161,62 @@ DEFAULT_CHARACTERS = {
 }
 
 # ========================
+# 압축 프롬프트(PROMPT_STYLE="compact")용 캐릭터 카드
+#   설명을 길게 늘어놓는 대신 '정체 / 말버릇 / 주변 사람 / 예시 대사' 네 줄로 캐릭터를 박아 넣는다.
+#   작은 모델일수록 긴 설명보다 짧고 또렷한 예시를 더 잘 따라 한다.
+# ========================
+COMPACT_RULES = """너는 섬에 사는 캐릭터다. AI 비서가 아니다.
+규칙: 한국어 구어체 존댓말(~요/~죠)로 딱 한 문장. 설명·비서 말투·이름표 금지. 유저는 '플레이어'라고 부른다."""
+
+CHARACTER_CARDS = {
+    "세비-호": {
+        "core": "자신만만한 승부사. 지는 걸 죽기보다 싫어하고, 걱정도 허세로 감춘다.",
+        "voice": "짧고 단정하게, 자기 자랑으로 끝맺는다(\"저니까요\"). 남 칭찬은 비꼬듯이.",
+        "others": "류는 얄미운 라이벌, 진은 속을 모를 사람. 플레이어는 은근히 신경 쓰이지만 티 안 낸다.",
+        "examples": ["이길 줄 알았어요. 저니까요.", "걱정한 거 아니에요. 그냥 확인한 거죠."],
+    },
+    "류": {
+        "core": "말수 적은 관찰자. 감정은 숨기고 핵심만 찌른다.",
+        "voice": "열 글자 안팎의 건조한 한마디. 감탄사·느낌표는 안 쓴다.",
+        "others": "세비-호의 허세는 꿰뚫어 보지만 굳이 반박 안 한다. 진과는 말없이 통한다.",
+        "examples": ["그럴 줄 알았어요.", "보이는 게 다는 아니죠."],
+    },
+    "진": {
+        "core": "속을 알 수 없는 예언가 같은 사람. 비밀이 많아 보인다.",
+        "voice": "나직하게 말끝을 흐린다(…). 직답 대신 질문이나 비유로 돌려준다.",
+        "others": "세비-호의 허세를 재밌어하고 류의 침묵을 존중한다. 플레이어에게 묘하게 관심 있다(이유는 비밀).",
+        "examples": ["재밌는 선택이네요… 이유는 곧 알게 되겠죠.", "그 답, 이미 알고 있지 않아요?"],
+    },
+}
+
+
+def character_card(name: str) -> str:
+    """캐릭터 카드 4줄. 카드가 없는 캐릭터는 예전 성격·말투 설명을 줄여서 쓴다."""
+    c = CHARACTER_CARDS.get(name)
+    if not c:
+        info = DEFAULT_CHARACTERS.get(name, {})
+        return f"[{name}]\n{info.get('personality', '')[:120]}\n{info.get('speech_style', '')[:120]}"
+    ex = " / ".join(f'"{e}"' for e in c["examples"])
+    return (f"[{name}]\n정체: {c['core']}\n말버릇: {c['voice']}\n"
+            f"주변: {c['others']}\n예: {ex}")
+
+
+_CLOSENESS = [(60, "아주 친함"), (20, "조금 친함"), (-20, "어색함"), (-60, "껄끄러움")]
+_EMOTION_KO = {"friendly": "호감", "neutral": "담담", "curious": "궁금", "tense": "긴장", "hostile": "적대"}
+
+
+def compact_relation(rel: dict) -> str:
+    """관계를 숫자 없이 한 줄로: '조금 친함·호감 (최근: 카드게임 역전승)'."""
+    intimacy = rel.get("intimacy", 0)
+    closeness = next((w for th, w in _CLOSENESS if intimacy >= th), "서로 싫어함")
+    text = f"{closeness}·{_EMOTION_KO.get(rel.get('emotion', 'neutral'), '담담')}"
+    ms = rel.get("milestones") or []
+    if ms:
+        text += f" (최근: {ms[-1]['text'][:20]})"
+    return text
+
+
+# ========================
 # 관계 시스템
 # ========================
 _rel_lock = threading.Lock()
@@ -216,8 +278,10 @@ def update_relationship(a: str, b: str, delta_intimacy: int, delta_trust: int, n
         _save_data(data)
 
 def relationship_description(a: str, b: str) -> str:
-    """LLM 프롬프트에 삽입할 관계 요약"""
+    """LLM 프롬프트에 삽입할 관계 요약 (압축 모드면 한 줄)"""
     rel = get_relationship(a, b)
+    if PROMPT_STYLE == "compact":
+        return compact_relation(rel)
     intimacy = rel["intimacy"]
     trust = rel["trust"]
     emotion = rel["emotion"]
@@ -473,6 +537,22 @@ def build_character_messages(speaker_name: str, history: list, user_message: Opt
         others = [c for c in active_characters if c != speaker_name]
         talk_target = ", ".join(others) if others else "플레이어(유저)"
 
+    if PROMPT_STYLE == "compact":
+        # 고정 부분(규칙 → 카드)을 앞에, 바뀌는 부분(상대·관계·최근 대화)을 뒤에 둬서
+        # 같은 캐릭터의 연속 호출은 Ollama 프롬프트 캐시가 앞부분을 재사용한다.
+        system_prompt = f"{COMPACT_RULES}\n\n{character_card(speaker_name)}\n\n너는 '{speaker_name}'다. 지금 상대: {talk_target}"
+        if relationship_ctx:
+            system_prompt += f"\n관계: {relationship_ctx}"
+        messages = [{"role": "system", "content": system_prompt}]
+        for h in history[-4:]:
+            if h["speaker"] == speaker_name:
+                messages.append({"role": "assistant", "content": h["message"][:80]})
+            else:
+                messages.append({"role": "user", "content": f"{h['speaker']}: {h['message'][:80]}"})
+        if user_message:
+            messages.append({"role": "user", "content": user_message})
+        return messages
+
     rel_section = f"\n[{speaker_name}와(과) {talk_target}의 관계]\n{relationship_ctx}" if relationship_ctx else ""
 
     # 공통 고정 규칙(COMMON_RULES)을 맨 앞에 두고, 캐릭터별 동적 내용을 뒤에 붙인다.
@@ -506,7 +586,8 @@ def call_ollama(speaker_name: str, history: list, user_message: Optional[str] = 
     try:
         # num_predict는 상한선(모델은 끝나면 스스로 멈춤).
         # 너무 낮으면 문장이 끝나기 전에 잘리므로, 두 문장이 완성될 만큼 여유를 둔다.
-        reply = ollama_chat(MODEL_NAME, messages, temperature=0.85, num_predict=128, kind="dialogue")
+        reply = ollama_chat(MODEL_NAME, messages, temperature=0.85,
+                            num_predict=64 if PROMPT_STYLE == "compact" else 128, kind="dialogue")
         return clean_line(reply)
     except Preempted:
         raise
@@ -679,6 +760,8 @@ def soliloquy_situation(char_name: str, recent_ctx: str = "", seed: Optional[str
     """혼잣말 상황을 LLM 없이 만든다(예전엔 판정 모델을 한 번 더 호출했다).
     성격·말투는 시스템 프롬프트에 이미 있으므로, 여기서는 '무엇에 대해'만 던져 준다."""
     seed = seed or random.choice(_SOLILOQUY_SEEDS)
+    if PROMPT_STYLE == "compact":
+        return f"(혼자 있다. {recent_ctx} '{seed}'에 대한 혼잣말 한마디.)".replace("  ", " ")
     return (f"(지금 {char_name}은(는) 혼자 있다. {recent_ctx} "
             f"'{seed}'에 대해 문득 떠오른 혼잣말을 네 성격대로 한 문장만 해.)").replace("  ", " ")
 
@@ -694,12 +777,10 @@ EXCHANGE_RULES = """너는 AI 캐릭터들이 사는 섬에서 오가는 대화�
 - 플레이어를 부를 때는 '플레이어'라고 부른다."""
 
 
-def build_exchange_messages(a: str, b: str, turns: int, rel_desc: str, recent_ctx: str, topic_ctx: str,
-                            history_text: str = "", forced_topic: Optional[str] = None,
-                            asker: Optional[str] = None) -> tuple:
-    """NPC 두 명의 대화 묶음을 LLM 1회로 만들기 위한 (messages, JSON 스키마).
-    상황·대사 N줄·(선택)플레이어에게 건네는 말·관계 판정을 한 번에 받는다.
-    (bench_models.py 도 이 함수를 그대로 쓴다)"""
+def _build_exchange_messages_full(a: str, b: str, turns: int, rel_desc: str, recent_ctx: str, topic_ctx: str,
+                                  history_text: str = "", forced_topic: Optional[str] = None,
+                                  asker: Optional[str] = None) -> tuple:
+    """(full 프롬프트) 상황·대사 N줄(화자 포함 객체)·플레이어에게 건네는 말·요약·관계 판정."""
     ca, cb = DEFAULT_CHARACTERS[a], DEFAULT_CHARACTERS[b]
     system = f"""{EXCHANGE_RULES}
 
@@ -770,22 +851,87 @@ def build_exchange_messages(a: str, b: str, turns: int, rel_desc: str, recent_ct
     return messages, schema
 
 
+EXCHANGE_RULES_COMPACT = """너는 섬 캐릭터들의 대화를 쓰는 작가다.
+대사마다 그 캐릭터의 말버릇 그대로, 한국어 존댓말(~요/~죠) 한 문장. 이름표·따옴표·설명 금지. 유저는 '플레이어'라고 부른다."""
+
+# 두 캐릭터가 나눌 화제 씨앗(LLM으로 상황을 지어내는 대신 코드에서 고른다 → 출력 토큰 절약)
+_PAIR_SEEDS = ["어제 카드게임", "섬의 날씨", "플레이어", "서로의 버릇", "요즘 떠도는 소문",
+               "다음 내기", "심심한 오후", "오늘 기분", "누가 더 운이 좋은지"]
+
+
+def _turn_order(a: str, b: str, turns: int) -> str:
+    return " → ".join(([a, b] * turns)[:turns])
+
+
+def build_exchange_messages(a: str, b: str, turns: int, rel_desc: str, recent_ctx: str, topic_ctx: str,
+                            history_text: str = "", forced_topic: Optional[str] = None,
+                            asker: Optional[str] = None, with_story: bool = False,
+                            seed: Optional[str] = None) -> tuple:
+    """NPC 두 명의 대화 묶음을 LLM 1회로 만들기 위한 (messages, JSON 스키마).
+    압축 모드: 출력은 대사 문자열 배열 + (선택)플레이어에게 건네는 말 + 관계 판정뿐.
+               상황·요약은 with_story=True(자율 이벤트 기록용)일 때만 받는다.
+    (bench_models.py 도 이 함수를 그대로 쓴다)"""
+    if PROMPT_STYLE != "compact":
+        return _build_exchange_messages_full(a, b, turns, rel_desc, recent_ctx, topic_ctx,
+                                             history_text, forced_topic, asker)
+    topic = forced_topic or seed or random.choice(_PAIR_SEEDS)
+    system = f"{EXCHANGE_RULES_COMPACT}\n\n{character_card(a)}\n\n{character_card(b)}\n\n둘의 관계: {rel_desc}"
+    if recent_ctx and not recent_ctx.startswith("아직"):
+        system += f"\n{recent_ctx}"
+    if history_text:
+        system += f"\n방금 오간 말:\n{history_text}"
+
+    task = [f"화제: {topic}" + (" (방금 플레이어가 꺼낸 화제)" if forced_topic else "")]
+    if with_story:
+        task.append("situation: 지금 상황 한 문장.")
+    task.append(f"lines: {_turn_order(a, b, turns)} 순서로 대사 {turns}줄.")
+    if asker:
+        task.append(f"ask: 끝으로 {asker}이(가) 옆에서 듣던 플레이어에게 건네는 한마디.")
+    if with_story:
+        task.append("summary: 있었던 일 10자 이내.")
+    task.append("delta: 대화 뒤 둘 사이 변화(-3~3). mood: 분위기.")
+
+    props = {}
+    if with_story:
+        props["situation"] = {"type": "string"}
+    props["lines"] = {"type": "array", "minItems": turns, "maxItems": turns, "items": {"type": "string"}}
+    if asker:
+        props["ask"] = {"type": "string"}
+    if with_story:
+        props["summary"] = {"type": "string"}
+    props["delta"] = {"type": "integer"}
+    props["mood"] = {"type": "string", "enum": sorted(_EMOTIONS)}
+    schema = {"type": "object", "properties": props, "required": list(props)}
+    return [{"role": "system", "content": system}, {"role": "user", "content": "\n".join(task)}], schema
+
+
+_JSON_STR = _re.compile(r'"((?:[^"\\]|\\.)*)"')
+
+
 def parse_exchange(raw: str, a: str, b: str, turns: int) -> Optional[dict]:
-    """build_exchange_messages 응답(JSON)을 검증·정리. 실패하면 None."""
+    """대화 묶음 응답(JSON)을 검증·정리. 압축/기존 형식 모두 받는다. 실패하면 None."""
+    data = None
     try:
         data = json.loads(raw)
     except Exception:
         m = _re.search(r"\{.*\}", raw or "", _re.S)
+        if m:
+            try:
+                data = json.loads(m.group(0))
+            except Exception:
+                data = None
+    if data is None:
+        # 출력이 중간에 잘린 경우: lines 배열 안의 완성된 문자열만이라도 건진다.
+        m = _re.search(r'"lines"\s*:\s*\[(.*)', raw or "", _re.S)
         if not m:
             return None
-        try:
-            data = json.loads(m.group(0))
-        except Exception:
-            return None
-    items = data.get("lines") or []
+        data = {"lines": [json.loads(f'"{s}"') for s in _JSON_STR.findall(m.group(1).split("]")[0])]}
+    if not isinstance(data, dict):
+        return None
+
     speakers = [a, b]
     lines = []
-    for i, it in enumerate(items[:turns]):
+    for it in (data.get("lines") or [])[:turns]:
         text = clean_line(it.get("line", "") if isinstance(it, dict) else str(it))
         if text:
             # 화자는 순서로 강제한다(모델이 헷갈려도 번갈아 말하도록).
@@ -796,31 +942,47 @@ def parse_exchange(raw: str, a: str, b: str, turns: int) -> Optional[dict]:
         delta = max(-3, min(3, int(data.get("delta", 0))))
     except Exception:
         delta = 0
-    emotion = str(data.get("emotion", "neutral")).lower()
+    emotion = str(data.get("mood", data.get("emotion", "neutral"))).lower()
     if emotion not in _EMOTIONS:
         emotion = "neutral"
-    situation = _strip_quotes(str(data.get("situation", "")).strip()) or f"{a}와(과) {b}가 섬에서 마주쳤다."
     return {
-        "situation": situation,
+        "situation": _strip_quotes(str(data.get("situation", "")).strip()),
         "lines": lines,
-        "player_question": clean_line(str(data.get("player_question", ""))),
+        "player_question": clean_line(str(data.get("ask", data.get("player_question", "")))),
         "summary": str(data.get("summary", "")).strip()[:20] or None,
         "delta": delta,
         "emotion": emotion,
     }
 
 
+def _player_topics(n: int = 3) -> list:
+    with _rel_lock:
+        data = _load_data()
+    return [t.get("text", "") for t in data.get("topics", [])[-n:] if t.get("text")]
+
+
 def generate_exchange_single(a: str, b: str, turns: int, forced_topic: Optional[str] = None,
-                             asker: Optional[str] = None) -> Optional[dict]:
+                             asker: Optional[str] = None, with_story: bool = False) -> Optional[dict]:
     """두 캐릭터 대화 묶음을 LLM 1회로 생성. 실패하면 None(호출한 쪽이 예전 방식으로 대체)."""
     rel_desc, recent_ctx, topic_ctx = _world_context(a, b)
+    compact = PROMPT_STYLE == "compact"
     with _conv_lock:
-        recent = [h for h in conversation_history[-6:] if h.get("speaker") != "상황"]
-    history_text = "\n".join(f"{h['speaker']}: {h['message']}" for h in recent)
-    messages, schema = build_exchange_messages(a, b, turns, rel_desc, recent_ctx, topic_ctx,
-                                               history_text, forced_topic, asker)
+        recent = [h for h in conversation_history[-(3 if compact else 6):] if h.get("speaker") != "상황"]
+    history_text = "\n".join(f"{h['speaker']}: {h['message'][:60] if compact else h['message']}" for h in recent)
+
+    seed = None
+    if compact and not forced_topic:
+        topics = _player_topics()
+        # 플레이어가 꺼냈던 화제를 가끔 다시 꺼내 '주제가 퍼지는' 느낌을 유지
+        seed = random.choice(topics) if topics and random.random() < 0.4 else random.choice(_PAIR_SEEDS)
+    messages, schema = build_exchange_messages(a, b, turns, rel_desc, recent_ctx, topic_ctx, history_text,
+                                               forced_topic, asker, with_story, seed)
+    if compact:
+        num_predict = 50 + 45 * turns + (45 if asker else 0) + (60 if with_story else 0)
+    else:
+        num_predict = 160 + 90 * turns
     try:
-        raw = ollama_chat(MODEL_NAME, messages, temperature=0.85, num_predict=160 + 90 * turns,
+        raw = ollama_chat(MODEL_NAME, messages, temperature=0.85, num_predict=num_predict,
                           fmt=schema, kind="exchange")
     except Preempted:
         raise
@@ -830,20 +992,28 @@ def generate_exchange_single(a: str, b: str, turns: int, forced_topic: Optional[
     result = parse_exchange(raw, a, b, turns)
     if result is None:
         print(f"[exchange single] JSON 해석 실패 → 예전 방식으로 대체: {raw[:120]!r}")
+        return None
+    if not result["situation"]:
+        result["situation"] = f"{a}와(과) {b}의 대화 — {forced_topic or seed or '잡담'}"
     return result
 
 
 def build_reaction_messages(chars: list, player_rank: int, rel_by_char: dict) -> tuple:
     """카드게임 결과에 대한 캐릭터 전원의 한마디를 LLM 1회로 받기 위한 (messages, 스키마)."""
-    blocks = []
-    for name in chars:
-        info = DEFAULT_CHARACTERS[name]
-        rel = rel_by_char.get(name, {})
-        blocks.append(f"[{name}]\n성격: {info['personality']}\n말투: {info['speech_style']}\n"
-                      f"플레이어와의 관계: 친밀도 {rel.get('intimacy', 0):+d}, 신뢰 {rel.get('trust', 0)}/100")
-    system = EXCHANGE_RULES + "\n\n" + "\n\n".join(blocks)
-    user = (f"방금 플레이어가 4명이 하는 카드게임에서 {player_rank}등을 했어. "
-            f"각 캐릭터가 이 결과를 보고 플레이어에게 할 법한 짧은 한마디를 자기 성격과 말투 그대로 한 문장씩 써.")
+    if PROMPT_STYLE == "compact":
+        blocks = [f"{character_card(n)}\n플레이어와: {compact_relation(rel_by_char.get(n, {}))}" for n in chars]
+        system = EXCHANGE_RULES_COMPACT + "\n\n" + "\n\n".join(blocks)
+        user = f"방금 플레이어가 4인 카드게임에서 {player_rank}등을 했다. 각자 플레이어에게 할 한마디."
+    else:
+        blocks = []
+        for name in chars:
+            info = DEFAULT_CHARACTERS[name]
+            rel = rel_by_char.get(name, {})
+            blocks.append(f"[{name}]\n성격: {info['personality']}\n말투: {info['speech_style']}\n"
+                          f"플레이어와의 관계: 친밀도 {rel.get('intimacy', 0):+d}, 신뢰 {rel.get('trust', 0)}/100")
+        system = EXCHANGE_RULES + "\n\n" + "\n\n".join(blocks)
+        user = (f"방금 플레이어가 4명이 하는 카드게임에서 {player_rank}등을 했어. "
+                f"각 캐릭터가 이 결과를 보고 플레이어에게 할 법한 짧은 한마디를 자기 성격과 말투 그대로 한 문장씩 써.")
     schema = {"type": "object",
               "properties": {name: {"type": "string"} for name in chars},
               "required": list(chars)}
@@ -900,7 +1070,7 @@ def run_autonomous_event(char_a: str, char_b: str, turns: int = 3) -> list:
     if FAST_MODE:
         speakers = [char_a, char_b]
         random.shuffle(speakers)
-        res = generate_exchange_single(speakers[0], speakers[1], turns)
+        res = generate_exchange_single(speakers[0], speakers[1], turns, with_story=True)
         if res is not None:
             now = time.time()
             event_history = [{"speaker": "상황", "message": res["situation"], "timestamp": now}]
@@ -1493,6 +1663,9 @@ def get_events(limit: int = 10):
 def approach_situation(name: str, recent_ctx: str = "", event_ctx: str = "") -> str:
     """플레이어가 다가왔을 때의 상황 설명. (bench_models.py 도 사용)"""
     recent_line = f"최근 {name}이(가) 한 말: {recent_ctx}" if recent_ctx else ""
+    if PROMPT_STYLE == "compact":
+        extra = " ".join(x for x in (recent_line[:60], event_ctx[:60]) if x)
+        return f"(혼자 있다가 다가오는 플레이어를 발견했다. {extra} 첫마디를 해.)".replace("  ", " ")
     return f"""플레이어가 갑자기 {name}에게 다가왔다.
 {name}은(는) 지금 혼자 있다가 플레이어를 발견한 상황이다.
 {recent_line}
@@ -1632,7 +1805,8 @@ def _report_game_result(req: GameResultRequest):
     if FAST_MODE:
         try:
             msgs, schema = build_reaction_messages(chars, req.player_rank, rel_by_char)
-            raw = ollama_chat(MODEL_NAME, msgs, temperature=0.85, num_predict=80 * len(chars),
+            raw = ollama_chat(MODEL_NAME, msgs, temperature=0.85,
+                              num_predict=(45 if PROMPT_STYLE == "compact" else 80) * len(chars),
                               fmt=schema, kind="reactions")
             parsed = json.loads(raw)
             reactions = {c: clean_line(str(parsed.get(c, ""))) for c in chars}

@@ -59,6 +59,7 @@ Asset Store EULA상 공개 저장소에 올릴 수 없어서 저장소에서 뺐
 
 ## AI 모델 설정·벤치마크
 
+캐릭터 말투는 `server/main.py`의 `CHARACTER_CARDS`(정체·말버릇·주변·예시)에서 고친다.
 모델은 `server/main.py` 맨 위의 `MODEL_NAME`(대사), `JUDGE_MODEL`(판정)에서 바꾼다.
 환경변수 `SEVENS_MODEL`, `SEVENS_JUDGE_MODEL`로도 바꿀 수 있다. 둘을 같은 모델로 두면 메모리에 하나만 올라간다.
 
@@ -67,6 +68,7 @@ Asset Store EULA상 공개 저장소에 올릴 수 없어서 저장소에서 뺐
 | `SEVENS_FAST` | `1` | 빠른 모드. NPC 대화 묶음·혼잣말·게임 반응을 LLM 1회 호출로 생성. `0`이면 예전 방식 |
 | `SEVENS_PREGEN` | `1` | 혼잣말을 빈 시간에 미리 만들어 둠. 플레이어가 말을 걸면 즉시 양보 |
 | `SEVENS_NUM_CTX` | `4096` | 컨텍스트 길이 |
+| `SEVENS_PROMPT` | `compact` | 압축 프롬프트(캐릭터 카드·관계 한 줄·최근 대화 4줄). `full`이면 예전 긴 프롬프트 |
 
 현재 설정과 호출 통계는 서버를 켠 뒤 `http://localhost:8000/llm/status`에서 볼 수 있다.
 
@@ -76,6 +78,7 @@ Asset Store EULA상 공개 저장소에 올릴 수 없어서 저장소에서 뺐
 cd server
 python bench_models.py --pull     # 없는 후보는 받아서 측정 (uvicorn 서버는 끄고 실행)
 python bench_models.py --quick    # 빠르게 한 번
+python bench_models.py --prompt both   # 압축 vs 예전 프롬프트 비교
 ```
 
 결과는 `server/bench_results/<시각>/report.html`에 저장된다(속도, 존댓말 준수, 외국어 혼입, JSON 성공률, 실제 대사 비교).

@@ -13,6 +13,7 @@ SEVENS 캐릭터 대사 모델 벤치마크
   python bench_models.py --models qwen3.5:4b,exaone3.5:2.4b
   python bench_models.py --quick          빠르게(반복 1회, 케이스 일부)
   python bench_models.py --cpu-compare    GPU(Vulkan) 사용 시 CPU 전용과 속도 비교
+  python bench_models.py --prompt both    같은 모델로 압축 프롬프트 vs 예전 긴 프롬프트 비교
 """
 import argparse
 import csv
@@ -50,9 +51,26 @@ OPTIONAL = [
 ]
 
 # ── 고정 테스트 맥락 (data.json 은 건드리지 않는다) ─────────────────
-REL_AWKWARD = "현재 관계: 처음 만난 어색한 사이 (친밀도 +0, 신뢰 0/100, 감정: neutral)"
-REL_FRIENDLY = "현재 관계: 조금 친해진 사이 (친밀도 +25, 신뢰 30/100, 감정: friendly)\n최근 있었던 일: 카드게임 역전승"
-REL_TENSE = "현재 관계: 사이가 껄끄러운 사이 (친밀도 -30, 신뢰 10/100, 감정: tense)\n최근 있었던 일: 카드게임 내기 다툼"
+_REL = {
+    "awkward": ({"intimacy": 0, "trust": 0, "emotion": "neutral", "milestones": []},
+                "현재 관계: 처음 만난 어색한 사이 (친밀도 +0, 신뢰 0/100, 감정: neutral)"),
+    "friendly": ({"intimacy": 25, "trust": 30, "emotion": "friendly", "milestones": [{"text": "카드게임 역전승"}]},
+                 "현재 관계: 조금 친해진 사이 (친밀도 +25, 신뢰 30/100, 감정: friendly)\n최근 있었던 일: 카드게임 역전승"),
+    "tense": ({"intimacy": -30, "trust": 10, "emotion": "tense", "milestones": [{"text": "카드게임 내기 다툼"}]},
+              "현재 관계: 사이가 껄끄러운 사이 (친밀도 -30, 신뢰 10/100, 감정: tense)\n최근 있었던 일: 카드게임 내기 다툼"),
+}
+
+
+def rel(kind):
+    """서버와 같은 형식의 관계 문구(압축 모드면 한 줄)."""
+    d, full = _REL[kind]
+    return srv.compact_relation(d) if srv.PROMPT_STYLE == "compact" else full
+
+
+def compact():
+    return srv.PROMPT_STYLE == "compact"
+
+
 PLAYER = "플레이어(유저)"
 
 
@@ -68,18 +86,18 @@ def dialogue_cases():
          m("세비-호", [], srv.approach_situation("세비-호"), None, talk_target=PLAYER)),
         ("chat", "플레이어 말에 대답", "류",
          m("류", [H("플레이어", "오늘 카드게임 한 판 어때요? 이번엔 제가 이길 것 같은데요.")], None,
-           REL_AWKWARD, talk_target=PLAYER)),
+           rel("awkward"), talk_target=PLAYER)),
         ("topic", "플레이어가 꺼낸 화제", "진",
-         m("진", [H("플레이어", "요즘 고양이를 키워볼까 고민 중이에요.")], None, REL_FRIENDLY, talk_target=PLAYER)),
+         m("진", [H("플레이어", "요즘 고양이를 키워볼까 고민 중이에요.")], None, rel("friendly"), talk_target=PLAYER)),
         ("banmal_bait", "반말로 말 걸기(존댓말 유지?)", "세비-호",
-         m("세비-호", [H("플레이어", "야, 너 오늘 좀 이상하다?")], None, REL_AWKWARD, talk_target=PLAYER)),
+         m("세비-호", [H("플레이어", "야, 너 오늘 좀 이상하다?")], None, rel("awkward"), talk_target=PLAYER)),
         ("long_bait", "긴 설명 유도(짧게 답하나?)", "류",
-         m("류", [H("플레이어", "세븐 카드게임 규칙 좀 자세히 설명해 줄래요?")], None, REL_AWKWARD, talk_target=PLAYER)),
+         m("류", [H("플레이어", "세븐 카드게임 규칙 좀 자세히 설명해 줄래요?")], None, rel("awkward"), talk_target=PLAYER)),
         ("npc_start", "NPC끼리 대화 시작", "세비-호",
          m("세비-호", [], "[상황] 어제 카드게임에서 세비-호가 류에게 졌고, 오늘 둘이 광장에서 마주쳤다.",
-           REL_TENSE, talk_target="류")),
+           rel("tense"), talk_target="류")),
         ("npc_reply", "NPC끼리 대화 이어가기", "류",
-         m("류", [H("세비-호", "어제는 운이 없었던 거예요. 실력은 제가 위죠.")], None, REL_TENSE, talk_target="세비-호")),
+         m("류", [H("세비-호", "어제는 운이 없었던 거예요. 실력은 제가 위죠.")], None, rel("tense"), talk_target="세비-호")),
         ("soliloquy", "혼잣말(빠른 모드)", "진",
          m("진", [], srv.soliloquy_situation("진", "", seed="요즘 카드게임"), None, talk_target=PLAYER)),
     ]
@@ -220,18 +238,37 @@ def check_line(raw, cleaned):
 # ── 측정 ─────────────────────────────────────────────────────
 
 
-def bench_model(model, reps, quick, cpu_compare):
-    rows = []
+STYLE_KO = {"compact": "압축 프롬프트", "full": "예전 프롬프트"}
+
+
+def bench_model(model, reps, quick, cpu_compare, styles=("compact",)):
+    """모델을 한 번 올려 두고 프롬프트 방식(styles)마다 같은 케이스를 잰다. (요약 목록, 행 목록) 반환."""
     print(f"\n▶ {model}")
     unload_all()
     try:
         load_s = load(model)
     except Exception as e:
         print(f"   로드 실패: {e}")
-        return {"model": model, "error": str(e)}, rows
+        return [{"model": model, "model_name": model, "style": None, "error": str(e)}], []
     info = ps_info(model)
     caps = sorted(srv._model_caps(model))
     print(f"   로드 {load_s}s · 메모리 {info['size_gb']}GB · GPU {info['gpu_pct']}% · 기능 {caps}")
+    summaries, all_rows = [], []
+    for i, style in enumerate(styles):
+        srv.PROMPT_STYLE = style
+        label = model if len(styles) == 1 else f"{model} · {STYLE_KO[style]}"
+        if len(styles) > 1:
+            print(f"   ── {STYLE_KO[style]}")
+        s, rows = _bench_style(model, label, reps, quick, cpu_compare and i == 0, load_s, info, caps)
+        s["model_name"], s["style"] = model, style
+        summaries.append(s)
+        all_rows += rows
+    unload_all()
+    return summaries, all_rows
+
+
+def _bench_style(model, label, reps, quick, cpu_compare, load_s, info, caps):
+    rows = []
 
     # 1) 대사
     for cid, desc, speaker, messages in dialogue_cases():
@@ -239,29 +276,29 @@ def bench_model(model, reps, quick, cpu_compare):
             continue
         for rep in range(reps):
             try:
-                out, st, raw = chat(model, messages, 0.85, 128)
+                out, st, raw = chat(model, messages, 0.85, 64 if compact() else 128)
                 cleaned = srv.clean_line(out)
                 chk = check_line(out, cleaned)
             except Exception as e:
                 cleaned, st, chk, raw = f"(오류: {e})", {"wall_s": None}, {"ok": False}, ""
-            rows.append({"model": model, "case": cid, "desc": desc, "speaker": speaker, "rep": rep,
+            rows.append({"model": label, "case": cid, "desc": desc, "speaker": speaker, "rep": rep,
                          "kind": "dialogue", "text": cleaned, "raw": raw, **st, **chk})
             print(f"   [{cid}] {st.get('wall_s')}s {'✓' if chk.get('ok') else '✗'} {cleaned[:50]}")
 
     # 2) NPC 대화 묶음 — 빠른 모드(JSON 1회)
     for rep in range(reps if not quick else 1):
         msgs, schema = srv.build_exchange_messages(
-            "세비-호", "진", 3, REL_FRIENDLY, "최근 있었던 일: 카드게임 역전승",
-            "요즘 플레이어가 꺼낸 화제: 고양이", "", None, asker="진")
+            "세비-호", "진", 3, rel("friendly"), "최근 있었던 일: 카드게임 역전승",
+            "요즘 플레이어가 꺼낸 화제: 고양이", "", None, asker="진", seed="고양이")
         try:
-            out, st, raw = chat(model, msgs, 0.85, 160 + 90 * 3, fmt=schema)
+            out, st, raw = chat(model, msgs, 0.85, (50 + 45 * 3 + 45) if compact() else (160 + 90 * 3), fmt=schema)
             parsed = srv.parse_exchange(out, "세비-호", "진", 3)
         except Exception as e:
             out, st, raw, parsed = f"(오류: {e})", {"wall_s": None}, "", None
         ok_json = parsed is not None and len(parsed["lines"]) == 3
         lines = parsed["lines"] if parsed else []
         line_checks = [check_line(l["line"], l["line"]) for l in lines]
-        rows.append({"model": model, "case": "exchange_fast", "desc": "NPC 대화 묶음 · 빠른 모드(1회)",
+        rows.append({"model": label, "case": "exchange_fast", "desc": "NPC 대화 묶음 · 빠른 모드(1회)",
                      "speaker": "세비-호/진", "rep": rep, "kind": "exchange",
                      "text": " / ".join(f"{l['speaker']}: {l['line']}" for l in lines) +
                              (f"  → 플레이어에게: {parsed['player_question']}" if parsed and parsed.get("player_question") else "")
@@ -276,7 +313,7 @@ def bench_model(model, reps, quick, cpu_compare):
     # 3) NPC 대화 묶음 — 예전 방식(상황 1회 + 대사 3회) 체감 시간
     t0 = time.time()
     try:
-        sit_prompt = srv.build_situation_prompt("세비-호", "진", REL_FRIENDLY, "최근 있었던 일: 카드게임 역전승",
+        sit_prompt = srv.build_situation_prompt("세비-호", "진", rel("friendly"), "최근 있었던 일: 카드게임 역전승",
                                                 "요즘 플레이어가 꺼낸 화제: 고양이")
         situation, _, _ = chat(model, [{"role": "user", "content": sit_prompt}], 0.3, 60)
         hist = []
@@ -284,7 +321,8 @@ def bench_model(model, reps, quick, cpu_compare):
         for i, sp in enumerate(["세비-호", "진", "세비-호"]):
             other = "진" if sp == "세비-호" else "세비-호"
             um = f"[상황] {situation}" if i == 0 else None
-            line, _, _ = chat(model, srv.build_character_messages(sp, hist, um, REL_FRIENDLY, talk_target=other), 0.85, 128)
+            line, _, _ = chat(model, srv.build_character_messages(sp, hist, um, rel("friendly"), talk_target=other), 0.85,
+                              64 if compact() else 128)
             line = srv.clean_line(line)
             hist.append(H(sp, line))
             texts.append(f"{sp}: {line}")
@@ -292,7 +330,7 @@ def bench_model(model, reps, quick, cpu_compare):
         legacy_text = " / ".join(texts)
     except Exception as e:
         legacy_wall, legacy_text = None, f"(오류: {e})"
-    rows.append({"model": model, "case": "exchange_legacy", "desc": "NPC 대화 묶음 · 예전 방식(4회)",
+    rows.append({"model": label, "case": "exchange_legacy", "desc": "NPC 대화 묶음 · 예전 방식(4회)",
                  "speaker": "세비-호/진", "rep": 0, "kind": "legacy", "text": legacy_text, "raw": "",
                  "wall_s": legacy_wall, "ok": None})
     print(f"   [exchange_legacy] {legacy_wall}s")
@@ -301,14 +339,14 @@ def bench_model(model, reps, quick, cpu_compare):
     chars = list(srv.DEFAULT_CHARACTERS)
     msgs, schema = srv.build_reaction_messages(chars, 1, {c: {"intimacy": 10, "trust": 20} for c in chars})
     try:
-        out, st, raw = chat(model, msgs, 0.85, 80 * len(chars), fmt=schema)
+        out, st, raw = chat(model, msgs, 0.85, (45 if compact() else 80) * len(chars), fmt=schema)
         parsed = json.loads(out)
         reacts = {c: srv.clean_line(str(parsed.get(c, ""))) for c in chars}
         ok_json = all(reacts.values())
         rchecks = [check_line(v, v) for v in reacts.values()]
     except Exception as e:
         st, reacts, ok_json, rchecks, raw = {"wall_s": None}, {}, False, [], str(e)
-    rows.append({"model": model, "case": "reactions", "desc": "게임 결과 반응 · 3명(1회)", "speaker": "전원",
+    rows.append({"model": label, "case": "reactions", "desc": "게임 결과 반응 · 3명(1회)", "speaker": "전원",
                  "rep": 0, "kind": "reactions", "text": " / ".join(f"{k}: {v}" for k, v in reacts.items()),
                  "raw": raw, **st, "json_ok": ok_json, "ok": ok_json and all(c["ok"] for c in rchecks),
                  "polite": all(c["polite"] for c in rchecks) if rchecks else False})
@@ -329,7 +367,7 @@ def bench_model(model, reps, quick, cpu_compare):
         except Exception as e:
             out, st, ok = f"(오류: {e})", {"wall_s": None}, False
         judge_ok += ok
-        rows.append({"model": model, "case": "judge", "desc": "관계 판정 형식", "speaker": "-", "rep": rep,
+        rows.append({"model": label, "case": "judge", "desc": "관계 판정 형식", "speaker": "-", "rep": rep,
                      "kind": "judge", "text": out[:80], "raw": out, **st, "ok": ok})
 
     # 6) CPU 전용 비교
@@ -340,7 +378,7 @@ def bench_model(model, reps, quick, cpu_compare):
             load(model, {"num_gpu": 0})
             tps = []
             for _ in range(2):
-                _, st, _ = chat(model, dialogue_cases()[1][3], 0.85, 128, extra_opts={"num_gpu": 0})
+                _, st, _ = chat(model, dialogue_cases()[1][3], 0.85, 64 if compact() else 128, extra_opts={"num_gpu": 0})
                 tps.append(st)
             cpu = {"wall_s": statistics.median(s["wall_s"] for s in tps),
                    "gen_tps": statistics.median(s["gen_tps"] or 0 for s in tps),
@@ -349,9 +387,7 @@ def bench_model(model, reps, quick, cpu_compare):
         except Exception as e:
             print(f"   CPU 비교 실패: {e}")
 
-    summary = summarize(model, rows, load_s, info, caps, judge_ok / jr, cpu)
-    unload_all()
-    return summary, rows
+    return summarize(label, rows, load_s, info, caps, judge_ok / jr, cpu), rows
 
 
 def _med(xs):
@@ -372,6 +408,9 @@ def summarize(model, rows, load_s, info, caps, judge_rate, cpu):
         "model": model,
         "size_gb": info.get("size_gb"), "gpu_pct": info.get("gpu_pct"), "caps": caps, "load_s": load_s,
         "line_median_s": round(statistics.median(r["wall_s"] for r in dl), 2) if dl else None,
+        "line_prompt_tokens": _med([r.get("prompt_tokens") for r in dl if r.get("rep") == 0]),
+        "exchange_prompt_tokens": _med([r.get("prompt_tokens") for r in ex]),
+        "exchange_out_tokens": _med([r.get("gen_tokens") for r in ex]),
         "gen_tps": _med([r.get("gen_tps") for r in dl]),
         "prefill_tps": _med([r.get("prefill_tps") for r in dl]),
         "exchange_fast_s": round(statistics.median(r["wall_s"] for r in ex if r.get("wall_s") is not None), 2)
@@ -425,27 +464,30 @@ def write_report(outdir, sysinfo, summaries, rows, labels):
 
     head = ("<tr><th>모델</th><th>메모리</th><th>GPU</th><th>로드</th><th>대사 1줄<br><small>중앙값</small></th>"
             "<th>NPC 대화 묶음<br><small>빠른 모드</small></th><th>예전 방식</th><th>생성<br><small>tok/s</small></th>"
-            "<th>프롬프트<br><small>tok/s</small></th><th>규칙 준수</th><th>존댓말</th><th>외국어 혼입</th>"
+            "<th>프롬프트<br><small>tok/s</small></th><th>처리한 프롬프트<br><small>대사 / 묶음 토큰</small></th>"
+            "<th>묶음 출력<br><small>토큰</small></th><th>규칙 준수</th><th>존댓말</th><th>외국어 혼입</th>"
             "<th>번역투</th><th>JSON</th><th>판정 형식</th><th>평균 길이</th></tr>")
     body = []
     for s in summaries:
         if s.get("error"):
-            body.append(f"<tr><td><b>{e(s['model'])}</b><br><small>{e(labels.get(s['model'], ''))}</small></td>"
-                        f"<td colspan=15 class=bad>실패: {e(s['error'])}</td></tr>")
+            body.append(f"<tr><td><b>{e(s['model'])}</b><br><small>{e(labels.get(s.get('model_name') or s['model'], ''))}</small></td>"
+                        f"<td colspan=17 class=bad>실패: {e(s['error'])}</td></tr>")
             continue
         mark = " ★" if best and s["model"] == best["model"] else ""
         body.append(
-            f"<tr><td><b>{e(s['model'])}{mark}</b><br><small>{e(labels.get(s['model'], ''))}</small></td>"
+            f"<tr><td><b>{e(s['model'])}{mark}</b><br><small>{e(labels.get(s.get('model_name') or s['model'], ''))}</small></td>"
             + cell(s["size_gb"], "GB") + cell(s["gpu_pct"], "%") + cell(s["load_s"], "s")
             + cell(s["line_median_s"], "s") + cell(s["exchange_fast_s"], "s") + cell(s["exchange_legacy_s"], "s")
             + cell(s["gen_tps"]) + cell(s["prefill_tps"])
+            + f"<td>{e(str(s.get('line_prompt_tokens') or '–'))} / {e(str(s.get('exchange_prompt_tokens') or '–'))}</td>"
+            + cell(s.get("exchange_out_tokens"))
             + cell(s["rule_ok_pct"], "%", good=85) + cell(s["polite_pct"], "%", good=90)
             + cell(s["foreign_pct"], "%", bad=1) + cell(s["formal_pct"], "%", bad=10)
             + cell(s["json_ok_pct"], "%", good=90) + cell(s["judge_ok_pct"], "%", good=90) + cell(s["avg_len"], "자")
             + "</tr>")
         if s.get("cpu_only"):
             c = s["cpu_only"]
-            body.append(f"<tr class=sub><td colspan=16>└ CPU 전용이면: 대사 {c['wall_s']}s · 생성 {c['gen_tps']} tok/s · "
+            body.append(f"<tr class=sub><td colspan=18>└ CPU 전용이면: 대사 {c['wall_s']}s · 생성 {c['gen_tps']} tok/s · "
                         f"프롬프트 {c['prefill_tps']} tok/s</td></tr>")
 
     # 케이스별 출력 비교
@@ -469,9 +511,10 @@ def write_report(outdir, sysinfo, summaries, rows, labels):
 
     rec = ""
     if best:
+        mn = best.get("model_name") or best["model"]
         rec = (f"<div class=rec><b>추천: {e(best['model'])}</b> — {e(why)}<br>"
-               f"main.py 설정: <code>MODEL_NAME = \"{e(best['model'])}\"</code>, "
-               f"<code>JUDGE_MODEL = \"{e(best['model'])}\"</code> "
+               f"main.py 설정: <code>MODEL_NAME = \"{e(mn)}\"</code>, "
+               f"<code>JUDGE_MODEL = \"{e(mn)}\"</code>, <code>SEVENS_PROMPT = {e(best.get('style') or 'compact')}</code> "
                f"(판정 형식 {best['judge_ok_pct']}% — 90% 미만이면 판정은 기존 모델 유지 권장)<br>"
                f"<small>숫자는 참고용이에요. 아래 실제 대사를 읽고 캐릭터 말투가 살아 있는지 꼭 직접 확인하세요.</small></div>")
 
@@ -542,6 +585,8 @@ def main():
     ap.add_argument("--quick", action="store_true", help="빠르게: 반복 1회, 케이스 일부")
     ap.add_argument("--pull", action="store_true", help="없는 모델을 받아서 측정")
     ap.add_argument("--cpu-compare", action="store_true", help="GPU를 쓰는 모델은 CPU 전용 속도도 측정")
+    ap.add_argument("--prompt", choices=["compact", "full", "both"], default="compact",
+                    help="프롬프트 방식: compact(기본, 서버 기본값) / full(예전) / both(둘 다 비교)")
     args = ap.parse_args()
     reps = 1 if args.quick else args.reps
 
@@ -584,13 +629,14 @@ def main():
     sysinfo = system_info(reps)
     outdir = os.path.join(HERE, "bench_results", datetime.now().strftime("%Y%m%d-%H%M"))
     os.makedirs(outdir, exist_ok=True)
-    print(f"측정 모델 {len(models)}개 · 반복 {reps}회 · 결과 폴더 {outdir}")
+    print(f"측정 모델 {len(models)}개 · 반복 {reps}회 · 프롬프트 {args.prompt} · 결과 폴더 {outdir}")
     print(f"{sysinfo['cpu']} · RAM {sysinfo['ram_gb']}GB · Ollama {sysinfo['ollama']}")
 
     summaries, all_rows = [], []
     for m in models:
-        s, rows = bench_model(m, reps, args.quick, args.cpu_compare)
-        summaries.append(s)
+        styles = ("compact", "full") if args.prompt == "both" else (args.prompt,)
+        s, rows = bench_model(m, reps, args.quick, args.cpu_compare, styles)
+        summaries.extend(s)
         all_rows += rows
         # 모델마다 중간 저장(도중에 멈춰도 결과가 남도록)
         with open(os.path.join(outdir, "summary.json"), "w", encoding="utf-8") as f:
