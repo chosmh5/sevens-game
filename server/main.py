@@ -24,8 +24,27 @@ app = FastAPI(lifespan=_lifespan)
 # ========================
 # LLM 설정 — 모델 교체는 여기(또는 환경변수)만 바꾸면 된다
 # ========================
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+def _default_ollama_url() -> str:
+    """Ollama 주소. OLLAMA_URL > OLLAMA_HOST(Ollama 자체 설정, 예: 0.0.0.0:11434) > 127.0.0.1:11434.
+    'localhost' 대신 127.0.0.1 을 쓴다(Windows에서 IPv6로 먼저 붙으려다 실패·지연되는 경우 방지)."""
+    if os.getenv("OLLAMA_URL"):
+        return os.getenv("OLLAMA_URL").rstrip("/")
+    host = os.getenv("OLLAMA_HOST", "").strip()
+    if host:
+        if "://" not in host:
+            host = "http://" + host
+        host = host.replace("0.0.0.0", "127.0.0.1").rstrip("/")
+        if host.count(":") < 2:
+            host += ":11434"
+        return host
+    return "http://127.0.0.1:11434"
+
+
+OLLAMA_URL = _default_ollama_url()
 OLLAMA_CHAT_URL = f"{OLLAMA_URL}/api/chat"
+# 시스템에 프록시(HTTP_PROXY 등)가 잡혀 있어도 로컬 Ollama 호출은 프록시를 거치지 않게 한다.
+for _k in ("NO_PROXY", "no_proxy"):
+    os.environ[_k] = ",".join(x for x in (os.environ.get(_k, ""), "localhost", "127.0.0.1") if x)
 
 # 캐릭터 대사용 / 내부 판정용 모델.
 # 둘을 같은 모델로 두면 메모리에 모델이 하나만 올라가서 전환 지연과 메모리 부담이 사라진다.

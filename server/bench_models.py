@@ -548,6 +548,44 @@ GPU = 모델이 GPU(Vulkan 등) 메모리에 올라간 비율.</p>
     return path, best
 
 
+def connect_ollama() -> bool:
+    """Ollama 연결 확인. 기본 주소가 안 되면 다른 주소도 시도하고, 실패하면 원인과 확인할 점을 보여준다."""
+    global OLLAMA
+    tried = []
+    for url in dict.fromkeys([OLLAMA, "http://127.0.0.1:11434", "http://localhost:11434"]):
+        try:
+            v = requests.get(f"{url}/api/version", timeout=10).json().get("version", "?")
+        except Exception as e:
+            msg = str(e)
+            if "10061" in msg or "refused" in msg.lower():
+                why = "연결 거부 — 이 주소에서 Ollama가 실행 중이 아니에요"
+            elif "timed out" in msg.lower() or "Timeout" in type(e).__name__:
+                why = "응답 없음(시간 초과) — Ollama가 멈춰 있거나 바쁜 상태일 수 있어요"
+            elif "proxy" in msg.lower():
+                why = "프록시 문제 — 시스템 프록시 설정을 확인하세요"
+            else:
+                why = f"{type(e).__name__}: {msg[-160:]}"
+            tried.append((url, why))
+            continue
+        if url != OLLAMA:
+            print(f"(기본 주소 {OLLAMA} 대신 {url} 로 연결했어요)")
+            OLLAMA = srv.OLLAMA_URL = url
+            srv.OLLAMA_CHAT_URL = f"{url}/api/chat"
+        print(f"Ollama {v} 연결됨 ({OLLAMA})")
+        return True
+    print("Ollama에 연결할 수 없어요.")
+    for url, err in tried:
+        print(f"  {url} → {err}")
+    print("""
+확인할 것:
+  1) 작업 표시줄 오른쪽 아래(숨겨진 아이콘 포함)에 Ollama 아이콘이 있나요?
+     없으면 시작 메뉴에서 'Ollama'를 실행하세요. (업데이트한 뒤에는 자동으로 안 켜질 수 있어요)
+     또는 새 터미널을 열어 'ollama serve'를 실행하고, 그 창은 켜 둔 채로 다시 시도하세요.
+  2) 브라우저에서 http://127.0.0.1:11434 를 열었을 때 'Ollama is running'이 보이면 정상이에요.
+  3) 'ollama list'는 되는데 이 오류가 계속되면 위의 오류 메시지를 그대로 알려주세요.""")
+    return False
+
+
 def system_info(reps):
     cpu = platform.processor()
     ram = None
@@ -590,10 +628,7 @@ def main():
     args = ap.parse_args()
     reps = 1 if args.quick else args.reps
 
-    try:
-        api("GET", "/api/version", timeout=5)
-    except Exception:
-        print(f"Ollama({OLLAMA})에 연결할 수 없어요. 'ollama serve'가 켜져 있는지 확인하세요.")
+    if not connect_ollama():
         sys.exit(1)
     try:
         requests.get("http://localhost:8000/", timeout=1)
