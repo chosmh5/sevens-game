@@ -49,8 +49,11 @@ for _k in ("NO_PROXY", "no_proxy"):
 # 캐릭터 대사용 / 내부 판정용 모델.
 # 둘을 같은 모델로 두면 메모리에 모델이 하나만 올라가서 전환 지연과 메모리 부담이 사라진다.
 # 어떤 모델이 좋은지는 bench_models.py 를 돌려서 고른다.
-MODEL_NAME  = os.getenv("SEVENS_MODEL", "exaone3.5:7.8b")
-JUDGE_MODEL = os.getenv("SEVENS_JUDGE_MODEL", "exaone3.5:2.4b")
+# 2026-10-15 벤치마크(Core Ultra 5 125H, CPU): qwen3.5:4b + 압축 프롬프트가
+#   캐릭터 말투·존댓말이 가장 좋고 대사 1줄 약 4초, NPC 대화 묶음 약 15초(예전 7.8B 방식 약 55초).
+#   더 빠른 쪽이 필요하면 exaone3.5:2.4b(대사 약 3초, 묶음 약 9초, 말투는 덜 또렷함).
+MODEL_NAME  = os.getenv("SEVENS_MODEL", "qwen3.5:4b")
+JUDGE_MODEL = os.getenv("SEVENS_JUDGE_MODEL", "qwen3.5:4b")   # 같은 모델 → 메모리에 하나만 상주
 
 # 컨텍스트 길이. 프롬프트가 1~2천 토큰이라 4096이면 충분하다.
 # 지정하지 않으면 최신 Ollama는 모델에 따라 훨씬 큰 값을 잡아 메모리·속도를 낭비한다.
@@ -185,26 +188,29 @@ DEFAULT_CHARACTERS = {
 #   작은 모델일수록 긴 설명보다 짧고 또렷한 예시를 더 잘 따라 한다.
 # ========================
 COMPACT_RULES = """너는 섬에 사는 캐릭터다. AI 비서가 아니다.
-규칙: 한국어 구어체 존댓말(~요/~죠)로 딱 한 문장. 설명·비서 말투·이름표 금지. 유저는 '플레이어'라고 부른다."""
+규칙: 한국어 구어체 존댓말(~요/~죠)로 딱 한 문장. 설명·비서 말투·이름표 금지. 유저는 '플레이어'라고 부른다.
+예시 대사는 말투 참고용이다. 그대로 따라 하지 말고 상황에 맞게 새로 말한다."""
 
 CHARACTER_CARDS = {
     "세비-호": {
         "core": "자신만만한 승부사. 지는 걸 죽기보다 싫어하고, 걱정도 허세로 감춘다.",
-        "voice": "짧고 단정하게, 자기 자랑으로 끝맺는다(\"저니까요\"). 남 칭찬은 비꼬듯이.",
+        "voice": "짧고 단정하게. 가끔 자기 자랑을 슬쩍 붙이고, 남 칭찬은 비꼬듯이 한다.",
         "others": "류는 얄미운 라이벌, 진은 속을 모를 사람. 플레이어는 은근히 신경 쓰이지만 티 안 낸다.",
-        "examples": ["이길 줄 알았어요. 저니까요.", "걱정한 거 아니에요. 그냥 확인한 거죠."],
+        "examples": ["이길 줄 알았어요. 저니까요.", "걱정한 거 아니에요. 그냥 확인한 거죠.",
+                     "운이 좋았네요. 다음엔 어림없어요."],
     },
     "류": {
         "core": "말수 적은 관찰자. 감정은 숨기고 핵심만 찌른다.",
         "voice": "열 글자 안팎의 건조한 한마디. 감탄사·느낌표는 안 쓴다.",
         "others": "세비-호의 허세는 꿰뚫어 보지만 굳이 반박 안 한다. 진과는 말없이 통한다.",
-        "examples": ["그럴 줄 알았어요.", "보이는 게 다는 아니죠."],
+        "examples": ["그럴 줄 알았어요.", "보이는 게 다는 아니죠.", "늦었네요."],
     },
     "진": {
         "core": "속을 알 수 없는 예언가 같은 사람. 비밀이 많아 보인다.",
         "voice": "나직하게 말끝을 흐린다(…). 직답 대신 질문이나 비유로 돌려준다.",
         "others": "세비-호의 허세를 재밌어하고 류의 침묵을 존중한다. 플레이어에게 묘하게 관심 있다(이유는 비밀).",
-        "examples": ["재밌는 선택이네요… 이유는 곧 알게 되겠죠.", "그 답, 이미 알고 있지 않아요?"],
+        "examples": ["재밌는 선택이네요… 이유는 곧 알게 되겠죠.", "그 답, 이미 알고 있지 않아요?",
+                     "오늘은 바람이 말이 많네요…"],
     },
 }
 
@@ -530,18 +536,104 @@ def ollama_chat(model: str, messages: list, *, temperature: float, num_predict: 
     return _THINK_RE.sub("", content).strip()
 
 
+# ── 존댓말 보정 ─────────────────────────────────────────────
+# 작은 모델은 프롬프트에 '존댓말'을 적어도 종종 반말로 끝낸다(벤치마크에서 EXAONE 2.4B는 80%가 반말).
+# 문장 끝 어미만 보고 흔한 반말 어미를 존댓말로 바꾼다. 확실한 경우만 바꾸고, 애매하면 그대로 둔다.
+_POLITE_DONE = ("요", "죠", "니까")
+_FORMAL_REPLACE = [          # 번역투 ~습니다/~입니다 → 구어체 ~어요 (흔한 것만)
+    ("있습니다", "있어요"), ("없습니다", "없어요"), ("었습니다", "었어요"), ("았습니다", "았어요"),
+    ("겠습니다", "겠어요"), ("했습니다", "했어요"), ("합니다", "해요"), ("됩니다", "돼요"),
+]
+_POLITE_REPLACE = [          # (반말 끝, 존댓말 끝) — 긴 것부터 검사
+    ("이야", "이에요"), ("거야", "거예요"), ("게야", "거예요"), ("구나", "군요"),
+    ("겠지", "겠죠"), ("잖아", "잖아요"), ("거든", "거든요"),
+    ("걱정 마", "걱정 마세요"), ("하지 마", "하지 마세요"),
+]
+_POLITE_ADD_YO = set("어아해워와봐줘돼겨져려쳐서가내래게데걸까네군고든")   # 끝에 '요'만 붙이면 되는 어미
+_HANGUL_RE = _re.compile(r"[\uac00-\ud7a3]")
+_NAMES_FOR_VOCATIVE = ("류", "진", "세비-호", "세비호")
+_VOCATIVE_TAIL = _re.compile(r"[,\s]+(플레이어|류|진|세비-호)(님|씨|야|아)?$")
+
+
+def _has_batchim(ch: str) -> bool:
+    return "\uac00" <= ch <= "\ud7a3" and (ord(ch) - 0xAC00) % 28 != 0
+
+
+def _politefy_sentence(body: str) -> str:
+    core = body.rstrip()
+    tail_ws = body[len(core):]
+    for old, new in _FORMAL_REPLACE:
+        if core.endswith(old):
+            return core[: -len(old)] + new + tail_ws
+    for old, new in (("것입니다", "거예요"), ("뿐입니다", "뿐이에요"), ("때문입니다", "때문이에요")):
+        if core.endswith(old):                       # '움직입니다'처럼 동사일 수 있는 일반 '~입니다'는 건드리지 않음
+            return core[: -len(old)] + new + tail_ws
+    if len(_HANGUL_RE.findall(core)) < 3 or core.endswith(_POLITE_DONE) or core.endswith("니다"):
+        return body
+    m = _VOCATIVE_TAIL.search(core)                  # "축하해, 플레이어" → 호칭 앞부분만 보정
+    if m and m.start() > 0:
+        return _politefy_sentence(core[: m.start()]) + m.group(0) + tail_ws
+    for vocative in _NAMES_FOR_VOCATIVE:            # "또 보네, 류야" 같은 끝 호칭은 건드리지 않음
+        if core.endswith((vocative + "야", vocative + "아")):
+            return body
+    for old, new in _POLITE_REPLACE:
+        if core.endswith(old):
+            return core[: -len(old)] + new + tail_ws
+    last = core[-1]
+    if last == "지":                               # 하지 → 하죠, 말이지 → 말이죠
+        return core[:-1] + "죠" + tail_ws
+    if last == "자":                               # 하자 → 하죠
+        return core[:-1] + "죠" + tail_ws
+    if last == "야" and len(core) >= 2 and not _has_batchim(core[-2]):   # 뭐야 → 뭐예요
+        return core[:-1] + "예요" + tail_ws
+    if last == "나" and len(core) >= 2:            # 않나? → 않나요?
+        return core + "요" + tail_ws
+    if last in _POLITE_ADD_YO:
+        return core + "요" + tail_ws
+    return body
+
+
+def politefy(text: str) -> str:
+    """문장마다 끝 어미를 보고 반말이면 존댓말로 바꾼다."""
+    parts = _re.split(r"([.!?…~]+\s*)", text or "")
+    out = []
+    for i in range(0, len(parts), 2):
+        body = parts[i]
+        punct = parts[i + 1] if i + 1 < len(parts) else ""
+        out.append(_politefy_sentence(body) + punct if body.strip() else body + punct)
+    return "".join(out)
+
+
+_HAN_RE = _re.compile(r"[\u4e00-\u9fff]+")
+_EMOJI_RE = _re.compile("[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]+")
+_ASIDE_RE = _re.compile(r"\s*[(（][^)）]*[)）]")
+
+
 def clean_line(reply: str) -> str:
-    """모델 출력 한 줄을 대사로 다듬는다: 이름 라벨·비서 군더더기·겹친 '요요'·감싼 따옴표 제거, 최대 2문장."""
+    """모델 출력 한 줄을 대사로 다듬는다: 이름 라벨·{이름}·괄호 지문·한자·비서 군더더기·겹친 '요요'·
+    감싼 따옴표 제거, 최대 2문장, 반말 어미는 존댓말로 보정."""
     reply = (reply or "").strip()
     for char_name in list(DEFAULT_CHARACTERS.keys()) + ["유저", "플레이어"]:
-        for prefix in [f"{char_name}: ", f"[{char_name}] ", f"{char_name}:"]:
+        for prefix in [f"{char_name}: ", f"[{char_name}] ", f"{{{char_name}}} ", f"{{{char_name}}}", f"{char_name}:"]:
             if reply.startswith(prefix):
                 reply = reply[len(prefix):].strip()
+    if reply in DEFAULT_CHARACTERS:                  # 이름만 덩그러니 나온 줄
+        return ""
+    reply = _ASIDE_RE.sub("", reply)                  # (웃으며) 같은 괄호 지문
+    reply = _HAN_RE.sub("", reply)                    # 중국어(한자) 혼입
+    reply = _EMOJI_RE.sub("", reply).replace("  ", " ")   # 이모지
     reply = _strip_quotes(reply)
     # 최대 2문장으로 강제(너무 길게 말하는 경향 차단). 비서 군더더기도 제거.
     reply = _trim_to_sentences(reply, max_sentences=2)
     # 종결어미가 '요요'로 겹쳐 나오는 버릇을 '요'로 정리.
     reply = _fix_double_yo(reply)
+    # 두 문장인데 너무 길면(80자 초과) 첫 문장만 — 작은 모델이 설명을 늘어놓는 경우
+    if len(reply) > 80:
+        first = _re.split(r'(?<=[.!?。…])\s+', reply, maxsplit=1)[0]
+        if 0 < len(first) < len(reply):
+            reply = first
+    # 반말 어미 → 존댓말
+    reply = politefy(reply)
     # 대사를 통째로 감싸거나 끝에 흘린 따옴표 제거.
     reply = _strip_quotes(reply)
     return reply.strip()
@@ -570,6 +662,10 @@ def build_character_messages(speaker_name: str, history: list, user_message: Opt
                 messages.append({"role": "user", "content": f"{h['speaker']}: {h['message'][:80]}"})
         if user_message:
             messages.append({"role": "user", "content": user_message})
+        if messages[-1]["role"] == "user":
+            messages[-1] = {"role": "user", "content": messages[-1]["content"] + "\n(존댓말 한 문장으로)"}
+        else:
+            messages.append({"role": "user", "content": "(이어서 존댓말 한 문장으로)"})
         return messages
 
     rel_section = f"\n[{speaker_name}와(과) {talk_target}의 관계]\n{relationship_ctx}" if relationship_ctx else ""
@@ -614,17 +710,21 @@ def call_ollama(speaker_name: str, history: list, user_message: Optional[str] = 
         return f"(응답 오류: {e})"
 
 
-def call_ollama_judge(prompt: str) -> str:
+def call_ollama_judge(prompt: str, fmt=None) -> str:
     """관계 변화 판정 등 단순 판단용 Ollama 호출"""
     try:
         return ollama_chat(JUDGE_MODEL, [{"role": "user", "content": prompt}],
-                           temperature=0.3, num_predict=60, kind="judge")
+                           temperature=0.3, num_predict=60, fmt=fmt, kind="judge")
     except Preempted:
         raise
     except Exception:
         return ""
 
 _EMOTIONS = {"friendly", "neutral", "curious", "tense", "hostile"}
+JUDGE_SCHEMA = {"type": "object",
+                "properties": {"delta": {"type": "integer"},
+                               "emotion": {"type": "string", "enum": sorted(_EMOTIONS)}},
+                "required": ["delta", "emotion"]}
 
 def judge_and_adjust_relationship(a: str, b: str, convo_text: str):
     """대화 내용을 보고 두 사람의 친밀도를 소폭 조정한다(백그라운드 작업자가 응답 뒤에 실행).
@@ -636,14 +736,19 @@ def judge_and_adjust_relationship(a: str, b: str, convo_text: str):
         f"[대화]\n{convo_text}\n\n"
         "친밀도 변화량을 -3~+3 정수로 정해(따뜻·친근하면 +, 평범·무관심하면 0, 차갑거나 다투면 -). "
         "감정은 friendly/neutral/curious/tense/hostile 중 하나.\n"
-        "반드시 이 한 줄 형식으로만 답해: delta=<정수> emotion=<단어>"
+        "delta 와 emotion 으로 답해."
     )
     try:
-        out = call_ollama_judge(prompt)
-        m = _re.search(r"delta\s*=\s*(-?\d+)", out)
-        delta = max(-3, min(3, int(m.group(1)))) if m else 0
-        em = _re.search(r"emotion\s*=\s*([a-zA-Z]+)", out)
-        emotion = em.group(1).lower() if em else "neutral"
+        out = call_ollama_judge(prompt, fmt=JUDGE_SCHEMA)
+        try:
+            j = json.loads(out)
+            delta = max(-3, min(3, int(j.get("delta", 0))))
+            emotion = str(j.get("emotion", "neutral")).lower()
+        except Exception:                            # 구조화 출력을 못 쓰는 환경이면 예전 형식으로 해석
+            m = _re.search(r"delta\s*=\s*([+-]?\d+)", out)
+            delta = max(-3, min(3, int(m.group(1)))) if m else 0
+            em = _re.search(r"emotion\s*=\s*([a-zA-Z]+)", out)
+            emotion = em.group(1).lower() if em else "neutral"
         if emotion not in _EMOTIONS:
             emotion = "neutral"
         update_relationship(a, b, delta, 1 if delta > 0 else 0, emotion)
@@ -909,6 +1014,7 @@ def build_exchange_messages(a: str, b: str, turns: int, rel_desc: str, recent_ct
     if with_story:
         task.append("summary: 있었던 일 10자 이내.")
     task.append("delta: 대화 뒤 둘 사이 변화(-3~3). mood: 분위기.")
+    task.append("모든 대사는 존댓말(~요/~죠) 한 문장. 예시 대사를 그대로 베끼지 않는다.")
 
     props = {}
     if with_story:
