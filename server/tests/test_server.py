@@ -71,7 +71,19 @@ CLEAN_CASES = [
     ("흥.", "흥."),
     ("보이지 않는 손이 그들을 움직입니다.", "보이지 않는 손이 그들을 움직입니다."),   # 애매하면 그대로
     ("세비-호", ""),
+    ("세비 - 호", ""),
+    ('평범하게 대답하세요. "아마, 운이 좋았을 뿐이에요."', "아마, 운이 좋았을 뿐이에요."),
+    ('류가 "졌다"고 하던데요.', '류가 "졌다"고 하던데요.'),
 ]
+# 대화 묶음 응답 해석: 이름만 쓴 칸은 버리고 화자는 칸 번호로
+_p = main.parse_exchange('{"1_세비-호":"세비 - 호","2_진":"정말 그럴까요?","3_세비-호":"두고 보면 알죠.",'
+                         '"진→플레이어":"플레이어는요?","delta":1,"mood":"curious"}', "세비-호", "진", 3)
+check(_p and [l["speaker"] for l in _p["lines"]] == ["진", "세비-호"] and _p["player_question"] == "플레이어는요?",
+      "parse_exchange keeps slot speakers and drops name-only slots")
+check(main.parse_exchange('{"1_세비-호":"이길 거예요.","2_진":"흠', "세비-호", "진", 3) is None,
+      "parse_exchange: fewer than 2 usable lines → None (fallback)")
+check(main.parse_judge('delta=+1 emotion=friendly') == (1, "friendly"), "parse_judge reads '+1'")
+check(main.parse_judge('{"delta": -2, "emotion": "tense"}') == (-2, "tense"), "parse_judge reads JSON")
 for raw, want in CLEAN_CASES:
     got = main.clean_line(raw)
     check(got == want, f"clean_line {raw!r} → {got!r}")
@@ -102,9 +114,9 @@ with TestClient(main.app) as c:
     if MODE == "fast":
         sys_prompt = ex_calls[0]["messages"][0]["content"]
         check("정체:" in sys_prompt and "성격:" not in sys_prompt, "compact: exchange uses character cards")
-        check("lines" in ex_calls[0]["format"]["properties"]
-              and ex_calls[0]["format"]["properties"]["lines"]["items"] == {"type": "string"},
-              "compact: lines are plain strings (no speaker objects)")
+        props = ex_calls[0]["format"]["properties"]
+        check(["1_세비-호", "2_류", "3_세비-호"] == [k for k in props if k[0].isdigit()],
+              "compact: line slots are named by speaker (1_세비-호, 2_류, 3_세비-호)")
         check("situation" not in ex_calls[0]["format"]["properties"], "compact: exchange skips situation")
 
     # 2) /conversation/user : 대사 1회 + 백그라운드 판정 1회(나중에)

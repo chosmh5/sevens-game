@@ -605,6 +605,8 @@ def politefy(text: str) -> str:
 
 
 _HAN_RE = _re.compile(r"[\u4e00-\u9fff]+")
+_NAMES_NORMALIZED = {_re.sub(r"[\s\-]", "", n) for n in DEFAULT_CHARACTERS}
+_QUOTED_TAIL = _re.compile(r"""(?:[.:!?]\s*|^)(["'“‘])([^"'“”‘’]{4,})["'”’]\s*$""")
 _EMOJI_RE = _re.compile("[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]+")
 _ASIDE_RE = _re.compile(r"\s*[(（][^)）]*[)）]")
 
@@ -617,8 +619,13 @@ def clean_line(reply: str) -> str:
         for prefix in [f"{char_name}: ", f"[{char_name}] ", f"{{{char_name}}} ", f"{{{char_name}}}", f"{char_name}:"]:
             if reply.startswith(prefix):
                 reply = reply[len(prefix):].strip()
-    if reply in DEFAULT_CHARACTERS:                  # 이름만 덩그러니 나온 줄
+    if _re.sub(r"[\s\-]", "", reply) in _NAMES_NORMALIZED:   # 이름만 덩그러니 나온 칸('세비 - 호')
         return ""
+    # '평범하게 대답하세요. "운이 좋았을 뿐이에요."' / "진이 이렇게 말했습니다. '...'"
+    # 처럼 앞에 지시·서술이 붙고 끝이 따옴표 대사로 끝나면 따옴표 안만 쓴다.
+    mq = _QUOTED_TAIL.search(reply)
+    if mq and mq.start() > 0:
+        reply = mq.group(2).strip()
     reply = _ASIDE_RE.sub("", reply)                  # (웃으며) 같은 괄호 지문
     reply = _HAN_RE.sub("", reply)                    # 중국어(한자) 혼입
     reply = _EMOJI_RE.sub("", reply).replace("  ", " ")   # 이모지
@@ -726,31 +733,39 @@ JUDGE_SCHEMA = {"type": "object",
                                "emotion": {"type": "string", "enum": sorted(_EMOTIONS)}},
                 "required": ["delta", "emotion"]}
 
-def judge_and_adjust_relationship(a: str, b: str, convo_text: str):
-    """대화 내용을 보고 두 사람의 친밀도를 소폭 조정한다(백그라운드 작업자가 응답 뒤에 실행).
-    따뜻·친근하면 +, 평범·무관심하면 0, 차갑거나 다투면 -. '점점' 변하도록 한 번에 최대 ±3."""
-    if a == b or not (convo_text or "").strip():
-        return
-    prompt = (
+def build_judge_prompt(a: str, b: str, convo_text: str) -> str:
+    """관계 판정 프롬프트(응답은 JUDGE_SCHEMA JSON). bench_models.py 도 사용."""
+    return (
         f"다음은 '{a}'와(과) '{b}'의 대화야. 이 대화로 둘 사이가 어떻게 변했는지 판단해.\n\n"
         f"[대화]\n{convo_text}\n\n"
         "친밀도 변화량을 -3~+3 정수로 정해(따뜻·친근하면 +, 평범·무관심하면 0, 차갑거나 다투면 -). "
         "감정은 friendly/neutral/curious/tense/hostile 중 하나.\n"
         "delta 와 emotion 으로 답해."
     )
+
+
+def parse_judge(out: str) -> tuple:
+    """판정 응답 → (delta -3~3, emotion). JSON이 아니면 'delta=+1 emotion=friendly' 형식으로 해석, 실패하면 (0, neutral)."""
     try:
-        out = call_ollama_judge(prompt, fmt=JUDGE_SCHEMA)
-        try:
-            j = json.loads(out)
-            delta = max(-3, min(3, int(j.get("delta", 0))))
-            emotion = str(j.get("emotion", "neutral")).lower()
-        except Exception:                            # 구조화 출력을 못 쓰는 환경이면 예전 형식으로 해석
-            m = _re.search(r"delta\s*=\s*([+-]?\d+)", out)
-            delta = max(-3, min(3, int(m.group(1)))) if m else 0
-            em = _re.search(r"emotion\s*=\s*([a-zA-Z]+)", out)
-            emotion = em.group(1).lower() if em else "neutral"
-        if emotion not in _EMOTIONS:
-            emotion = "neutral"
+        j = json.loads(out)
+        delta = max(-3, min(3, int(j.get("delta", 0))))
+        emotion = str(j.get("emotion", "neutral")).lower()
+    except Exception:
+        m = _re.search(r"delta\s*=\s*([+-]?\d+)", out or "")
+        delta = max(-3, min(3, int(m.group(1)))) if m else 0
+        em = _re.search(r"emotion\s*=\s*([a-zA-Z]+)", out or "")
+        emotion = em.group(1).lower() if em else "neutral"
+    return delta, (emotion if emotion in _EMOTIONS else "neutral")
+
+
+def judge_and_adjust_relationship(a: str, b: str, convo_text: str):
+    """대화 내용을 보고 두 사람의 친밀도를 소폭 조정한다(백그라운드 작업자가 응답 뒤에 실행).
+    따뜻·친근하면 +, 평범·무관심하면 0, 차갑거나 다투면 -. '점점' 변하도록 한 번에 최대 ±3."""
+    if a == b or not (convo_text or "").strip():
+        return
+    try:
+        out = call_ollama_judge(build_judge_prompt(a, b, convo_text), fmt=JUDGE_SCHEMA)
+        delta, emotion = parse_judge(out)
         update_relationship(a, b, delta, 1 if delta > 0 else 0, emotion)
     except Exception as e:
         print(f"[judge_and_adjust_relationship] 실패: {e}")
@@ -992,7 +1007,8 @@ def build_exchange_messages(a: str, b: str, turns: int, rel_desc: str, recent_ct
                             asker: Optional[str] = None, with_story: bool = False,
                             seed: Optional[str] = None) -> tuple:
     """NPC 두 명의 대화 묶음을 LLM 1회로 만들기 위한 (messages, JSON 스키마).
-    압축 모드: 출력은 대사 문자열 배열 + (선택)플레이어에게 건네는 말 + 관계 판정뿐.
+    압축 모드: 출력은 '1_세비-호', '2_진' 처럼 화자가 적힌 칸의 대사 + (선택)플레이어에게 건네는 말 + 관계 판정뿐.
+               (대사 배열만 주면 작은 모델이 칸에 이름을 써넣는 경우가 있어서, 칸 이름에 화자를 넣었다)
                상황·요약은 with_story=True(자율 이벤트 기록용)일 때만 받는다.
     (bench_models.py 도 이 함수를 그대로 쓴다)"""
     if PROMPT_STYLE != "compact":
@@ -1008,9 +1024,10 @@ def build_exchange_messages(a: str, b: str, turns: int, rel_desc: str, recent_ct
     task = [f"화제: {topic}" + (" (방금 플레이어가 꺼낸 화제)" if forced_topic else "")]
     if with_story:
         task.append("situation: 지금 상황 한 문장.")
-    task.append(f"lines: {_turn_order(a, b, turns)} 순서로 대사 {turns}줄.")
+    keys = line_keys(a, b, turns)
+    task.append(f"{', '.join(keys)} 칸에는 그 사람이 직접 하는 대사 한 문장을 쓴다(이름 말고 대사).")
     if asker:
-        task.append(f"ask: 끝으로 {asker}이(가) 옆에서 듣던 플레이어에게 건네는 한마디.")
+        task.append(f"{asker}→플레이어 칸에는 끝으로 {asker}이(가) 옆에서 듣던 플레이어에게 직접 건네는 한마디.")
     if with_story:
         task.append("summary: 있었던 일 10자 이내.")
     task.append("delta: 대화 뒤 둘 사이 변화(-3~3). mood: 분위기.")
@@ -1019,9 +1036,10 @@ def build_exchange_messages(a: str, b: str, turns: int, rel_desc: str, recent_ct
     props = {}
     if with_story:
         props["situation"] = {"type": "string"}
-    props["lines"] = {"type": "array", "minItems": turns, "maxItems": turns, "items": {"type": "string"}}
+    for k in keys:
+        props[k] = {"type": "string"}
     if asker:
-        props["ask"] = {"type": "string"}
+        props[f"{asker}→플레이어"] = {"type": "string"}
     if with_story:
         props["summary"] = {"type": "string"}
     props["delta"] = {"type": "integer"}
@@ -1031,6 +1049,12 @@ def build_exchange_messages(a: str, b: str, turns: int, rel_desc: str, recent_ct
 
 
 _JSON_STR = _re.compile(r'"((?:[^"\\]|\\.)*)"')
+_LINE_PAIR = _re.compile(r'"(\d+)_[^"]*"\s*:\s*"((?:[^"\\]|\\.)*)"')
+
+
+def line_keys(a: str, b: str, turns: int) -> list:
+    """대화 묶음 JSON의 대사 칸 이름: ['1_세비-호', '2_진', '3_세비-호']"""
+    return [f"{i + 1}_{[a, b][i % 2]}" for i in range(turns)]
 
 
 def parse_exchange(raw: str, a: str, b: str, turns: int) -> Optional[dict]:
@@ -1046,22 +1070,39 @@ def parse_exchange(raw: str, a: str, b: str, turns: int) -> Optional[dict]:
             except Exception:
                 data = None
     if data is None:
-        # 출력이 중간에 잘린 경우: lines 배열 안의 완성된 문자열만이라도 건진다.
-        m = _re.search(r'"lines"\s*:\s*\[(.*)', raw or "", _re.S)
-        if not m:
-            return None
-        data = {"lines": [json.loads(f'"{s}"') for s in _JSON_STR.findall(m.group(1).split("]")[0])]}
+        # 출력이 중간에 잘린 경우: 완성된 대사 칸만이라도 건진다.
+        pairs = _LINE_PAIR.findall(raw or "")
+        if pairs:
+            data = {f"{n}_": json.loads(f'"{s}"') for n, s in pairs}
+        else:
+            m = _re.search(r'"lines"\s*:\s*\[(.*)', raw or "", _re.S)
+            if not m:
+                return None
+            data = {"lines": [json.loads(f'"{s}"') for s in _JSON_STR.findall(m.group(1).split("]")[0])]}
     if not isinstance(data, dict):
         return None
 
+    # 압축 형식('1_세비-호': 대사) → 번호 순, 아니면 예전 형식(lines 배열)
+    numbered = []
+    for k, v in data.items():
+        mk = _re.match(r"^(\d+)_", k) if isinstance(k, str) else None
+        if mk:
+            numbered.append((int(mk.group(1)), v))
+    numbered.sort(key=lambda x: x[0])
+    # (칸 번호, 내용). 칸 번호가 있으면 화자는 칸으로 정한다(빈 칸이 있어도 화자가 밀리지 않게).
+    slots = numbered if numbered else list(enumerate(data.get("lines") or [], start=1))
+    ask = next((v for k, v in data.items() if isinstance(k, str) and k.endswith("→플레이어")),
+               data.get("ask", data.get("player_question", "")))
+
     speakers = [a, b]
     lines = []
-    for it in (data.get("lines") or [])[:turns]:
+    for n, it in slots[:turns]:
         text = clean_line(it.get("line", "") if isinstance(it, dict) else str(it))
         if text:
-            # 화자는 순서로 강제한다(모델이 헷갈려도 번갈아 말하도록).
-            lines.append({"speaker": speakers[len(lines) % 2], "line": text})
-    if not lines:
+            spk = speakers[(n - 1) % 2] if numbered else speakers[len(lines) % 2]
+            lines.append({"speaker": spk, "line": text})
+    # 쓸 만한 대사가 2줄 미만이면 실패로 보고 예전 방식으로 대체
+    if len(lines) < min(2, turns):
         return None
     try:
         delta = max(-3, min(3, int(data.get("delta", 0))))
@@ -1073,7 +1114,7 @@ def parse_exchange(raw: str, a: str, b: str, turns: int) -> Optional[dict]:
     return {
         "situation": _strip_quotes(str(data.get("situation", "")).strip()),
         "lines": lines,
-        "player_question": clean_line(str(data.get("ask", data.get("player_question", "")))),
+        "player_question": clean_line(str(ask or "")),
         "summary": str(data.get("summary", "")).strip()[:20] or None,
         "delta": delta,
         "emotion": emotion,

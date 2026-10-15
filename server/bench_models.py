@@ -352,22 +352,25 @@ def _bench_style(model, label, reps, quick, cpu_compare, load_s, info, caps):
                  "polite": all(c["polite"] for c in rchecks) if rchecks else False})
     print(f"   [reactions] {st.get('wall_s')}s JSON {'✓' if ok_json else '✗'}")
 
-    # 5) 관계 판정 형식 (판정 모델로 쓸 수 있나)
+    # 5) 관계 판정 (서버와 같은 JSON 판정)
     judge_ok = 0
     jr = 1 if quick else 2
+    convo = "플레이어: 어제 도와줘서 고마웠어요.\n류: 별거 아니었어요."
     for rep in range(jr):
-        prompt = ("다음은 '플레이어'와(과) '류'의 대화야. 이 대화로 둘 사이가 어떻게 변했는지 판단해.\n\n"
-                  "[대화]\n플레이어: 어제 도와줘서 고마웠어요.\n류: 별거 아니었어요.\n\n"
-                  "친밀도 변화량을 -3~+3 정수로 정해(따뜻·친근하면 +, 평범·무관심하면 0, 차갑거나 다투면 -). "
-                  "감정은 friendly/neutral/curious/tense/hostile 중 하나.\n"
-                  "반드시 이 한 줄 형식으로만 답해: delta=<정수> emotion=<단어>")
         try:
-            out, st, raw = chat(model, [{"role": "user", "content": prompt}], 0.3, 60)
-            ok = bool(re.search(r"delta\s*=\s*-?\d+", out)) and bool(re.search(r"emotion\s*=\s*[a-zA-Z]+", out))
+            out, st, raw = chat(model, [{"role": "user", "content": srv.build_judge_prompt("플레이어", "류", convo)}],
+                                0.3, 60, fmt=srv.JUDGE_SCHEMA)
+            try:
+                json.loads(out)
+                ok = True
+            except Exception:
+                ok = False
+            d, em = srv.parse_judge(out)
+            out = f"delta={d:+d} emotion={em}" + ("" if ok else f"  (JSON 아님: {out[:40]})")
         except Exception as e:
             out, st, ok = f"(오류: {e})", {"wall_s": None}, False
         judge_ok += ok
-        rows.append({"model": label, "case": "judge", "desc": "관계 판정 형식", "speaker": "-", "rep": rep,
+        rows.append({"model": label, "case": "judge", "desc": "관계 판정(JSON)", "speaker": "-", "rep": rep,
                      "kind": "judge", "text": out[:80], "raw": out, **st, "ok": ok})
 
     # 6) CPU 전용 비교
