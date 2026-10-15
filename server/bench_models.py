@@ -291,7 +291,7 @@ def _bench_style(model, label, reps, quick, cpu_compare, load_s, info, caps):
             "세비-호", "진", 3, rel("friendly"), "최근 있었던 일: 카드게임 역전승",
             "요즘 플레이어가 꺼낸 화제: 고양이", "", None, asker="진", seed="고양이")
         try:
-            out, st, raw = chat(model, msgs, 0.85, (50 + 45 * 3 + 45) if compact() else (160 + 90 * 3), fmt=schema)
+            out, st, raw = chat(model, msgs, 0.85, srv.exchange_num_predict(3, True), fmt=schema)
             parsed = srv.parse_exchange(out, "세비-호", "진", 3)
         except Exception as e:
             out, st, raw, parsed = f"(오류: {e})", {"wall_s": None}, "", None

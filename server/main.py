@@ -539,7 +539,7 @@ def ollama_chat(model: str, messages: list, *, temperature: float, num_predict: 
 # ── 존댓말 보정 ─────────────────────────────────────────────
 # 작은 모델은 프롬프트에 '존댓말'을 적어도 종종 반말로 끝낸다(벤치마크에서 EXAONE 2.4B는 80%가 반말).
 # 문장 끝 어미만 보고 흔한 반말 어미를 존댓말로 바꾼다. 확실한 경우만 바꾸고, 애매하면 그대로 둔다.
-_POLITE_DONE = ("요", "죠", "니까")
+_POLITE_DONE = ("요", "죠", "습니까")
 _FORMAL_REPLACE = [          # 번역투 ~습니다/~입니다 → 구어체 ~어요 (흔한 것만)
     ("있습니다", "있어요"), ("없습니다", "없어요"), ("었습니다", "었어요"), ("았습니다", "았어요"),
     ("겠습니다", "겠어요"), ("했습니다", "했어요"), ("합니다", "해요"), ("됩니다", "돼요"),
@@ -586,6 +586,11 @@ def _politefy_sentence(body: str) -> str:
         return core[:-1] + "죠" + tail_ws
     if last == "야" and len(core) >= 2 and not _has_batchim(core[-2]):   # 뭐야 → 뭐예요
         return core[:-1] + "예요" + tail_ws
+    for old, new in (("뭐냐", "뭐예요"), ("거냐", "거예요"), ("이냐", "이에요")):
+        if core.endswith(old):
+            return core[: -len(old)] + new + tail_ws
+    if last == "냐" and len(core) >= 2:            # 대단하냐? → 대단하나요?
+        return core[:-1] + "나요" + tail_ws
     if last == "나" and len(core) >= 2:            # 않나? → 않나요?
         return core + "요" + tail_ws
     if last in _POLITE_ADD_YO:
@@ -1121,6 +1126,13 @@ def parse_exchange(raw: str, a: str, b: str, turns: int) -> Optional[dict]:
     }
 
 
+def exchange_num_predict(turns: int, asker: bool, with_story: bool = False) -> int:
+    """대화 묶음 출력 토큰 상한. 모델은 끝나면 스스로 멈추므로 상한은 잘림 방지용으로 넉넉히."""
+    if PROMPT_STYLE == "compact":
+        return 80 + 60 * turns + (70 if asker else 0) + (80 if with_story else 0)
+    return 160 + 90 * turns
+
+
 def _player_topics(n: int = 3) -> list:
     with _rel_lock:
         data = _load_data()
@@ -1143,10 +1155,7 @@ def generate_exchange_single(a: str, b: str, turns: int, forced_topic: Optional[
         seed = random.choice(topics) if topics and random.random() < 0.4 else random.choice(_PAIR_SEEDS)
     messages, schema = build_exchange_messages(a, b, turns, rel_desc, recent_ctx, topic_ctx, history_text,
                                                forced_topic, asker, with_story, seed)
-    if compact:
-        num_predict = 50 + 45 * turns + (45 if asker else 0) + (60 if with_story else 0)
-    else:
-        num_predict = 160 + 90 * turns
+    num_predict = exchange_num_predict(turns, bool(asker), with_story)
     try:
         raw = ollama_chat(MODEL_NAME, messages, temperature=0.85, num_predict=num_predict,
                           fmt=schema, kind="exchange")
