@@ -45,18 +45,24 @@ public class GameResultReporter : MonoBehaviour
 
     void OnGameWon(Player winner)
     {
-        bool playerWon = !winner.IsAI;
-        int playerRank = playerWon ? 1 : 4; // 간략화: 이기면 1등, 지면 4등
-        int passCount  = 0;
+        // 순위: 승자 1등, 나머지는 남은 손패가 적은 순
+        int[] counts = _mgr.GetHandCounts();
+        int playerRank = 1;
+        if (winner.IsAI)
+        {
+            playerRank = 2;
+            for (int i = 1; i < counts.Length; i++)
+                if (i != winner.Index && counts[i] < counts[0]) playerRank++;
+        }
+        int passCount = _mgr.GetPassCount(0);
+        List<string> highlights = HighlightDirector.Instance != null
+            ? HighlightDirector.Instance.HighlightSummary()
+            : new List<string>();
 
-        // 플레이어 패스 횟수 가져오기 (PlayerIndex = 0)
-        // CardGameManager 내부 _players에 직접 접근 불가하므로
-        // winner 정보로 대체. 추후 확장 가능.
-
-        StartCoroutine(ReportAndShow(winner.Name, playerRank, passCount));
+        StartCoroutine(ReportAndShow(winner.Name, playerRank, passCount, highlights));
     }
 
-    IEnumerator ReportAndShow(string winnerName, int playerRank, int passCount)
+    IEnumerator ReportAndShow(string winnerName, int playerRank, int passCount, List<string> highlights)
     {
         // 결과 화면 즉시 표시
         string rankText = playerRank switch
@@ -67,14 +73,17 @@ public class GameResultReporter : MonoBehaviour
             _ => "패배..."
         };
         _resultLabel.text   = rankText;
-        _reactionLabel.text = "캐릭터 반응 확인 중...";
+        string recap = highlights != null && highlights.Count > 0
+            ? $"<color=#9FE8FF>명장면: {string.Join(" · ", highlights)}</color>\n\n"
+            : "";
+        _reactionLabel.text = recap + "캐릭터 반응 확인 중...";
         ShowOverlay(true);
 
         // 서버에 결과 보고
         GameResultResponse response = null;
         string rawJson = null;
 
-        yield return ReportWithRawJson(winnerName, playerRank, passCount,
+        yield return ReportWithRawJson(winnerName, playerRank, passCount, highlights,
             (resp, json) => { response = resp; rawJson = json; });
 
         if (response != null && rawJson != null)
@@ -84,7 +93,7 @@ public class GameResultReporter : MonoBehaviour
             if (reactions.Count > 0)
             {
                 // 각 캐릭터 반응을 순서대로 표시
-                yield return ShowReactions(reactions);
+                yield return ShowReactions(reactions, recap);
             }
             else
             {
@@ -102,10 +111,15 @@ public class GameResultReporter : MonoBehaviour
     }
 
     /// <summary>서버 호출 + raw JSON도 함께 받아오는 래퍼</summary>
-    IEnumerator ReportWithRawJson(string winner, int rank, int passCount,
+    IEnumerator ReportWithRawJson(string winner, int rank, int passCount, List<string> highlights,
                                    Action<GameResultResponse, string> callback)
     {
-        var body = $"{{\"winner\":\"{EscapeJson(winner)}\",\"player_rank\":{rank},\"pass_count\":{passCount}}}";
+        var hl = new System.Text.StringBuilder("[");
+        if (highlights != null)
+            for (int i = 0; i < highlights.Count; i++)
+                hl.Append(i > 0 ? "," : "").Append('"').Append(EscapeJson(highlights[i])).Append('"');
+        hl.Append(']');
+        var body = $"{{\"winner\":\"{EscapeJson(winner)}\",\"player_rank\":{rank},\"pass_count\":{passCount},\"highlights\":{hl}}}";
         using var req = new UnityEngine.Networking.UnityWebRequest(
             $"{GetServerUrl()}/game/result", "POST");
         req.uploadHandler   = new UnityEngine.Networking.UploadHandlerRaw(
@@ -143,11 +157,11 @@ public class GameResultReporter : MonoBehaviour
     //  반응 표시 연출
     // ══════════════════════════════════════════════════════════════
 
-    IEnumerator ShowReactions(List<GameResultReaction> reactions)
+    IEnumerator ShowReactions(List<GameResultReaction> reactions, string recap = "")
     {
         foreach (var r in reactions)
         {
-            _reactionLabel.text = $"<color=#FFDD66>{r.character}</color>\n{r.line}";
+            _reactionLabel.text = $"{recap}<color=#FFDD66>{r.character}</color>\n{r.line}";
             yield return new WaitForSeconds(resultDisplayTime);
         }
     }

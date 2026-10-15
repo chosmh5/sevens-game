@@ -1173,12 +1173,15 @@ def generate_exchange_single(a: str, b: str, turns: int, forced_topic: Optional[
     return result
 
 
-def build_reaction_messages(chars: list, player_rank: int, rel_by_char: dict) -> tuple:
-    """카드게임 결과에 대한 캐릭터 전원의 한마디를 LLM 1회로 받기 위한 (messages, 스키마)."""
+def build_reaction_messages(chars: list, player_rank: int, rel_by_char: dict,
+                            highlights: Optional[list] = None) -> tuple:
+    """카드게임 결과에 대한 캐릭터 전원의 한마디를 LLM 1회로 받기 위한 (messages, 스키마).
+    highlights 가 있으면 그 판의 명장면(역전 등)을 짚어서 말하게 한다."""
+    hl = f" 이번 판 명장면: {', '.join(highlights[:4])}." if highlights else ""
     if PROMPT_STYLE == "compact":
         blocks = [f"{character_card(n)}\n플레이어와: {compact_relation(rel_by_char.get(n, {}))}" for n in chars]
         system = EXCHANGE_RULES_COMPACT + "\n\n" + "\n\n".join(blocks)
-        user = f"방금 플레이어가 4인 카드게임에서 {player_rank}등을 했다. 각자 플레이어에게 할 한마디."
+        user = f"방금 플레이어가 4인 카드게임에서 {player_rank}등을 했다.{hl} 각자 플레이어에게 할 한마디."
     else:
         blocks = []
         for name in chars:
@@ -1187,7 +1190,7 @@ def build_reaction_messages(chars: list, player_rank: int, rel_by_char: dict) ->
             blocks.append(f"[{name}]\n성격: {info['personality']}\n말투: {info['speech_style']}\n"
                           f"플레이어와의 관계: 친밀도 {rel.get('intimacy', 0):+d}, 신뢰 {rel.get('trust', 0)}/100")
         system = EXCHANGE_RULES + "\n\n" + "\n\n".join(blocks)
-        user = (f"방금 플레이어가 4명이 하는 카드게임에서 {player_rank}등을 했어. "
+        user = (f"방금 플레이어가 4명이 하는 카드게임에서 {player_rank}등을 했어.{hl} "
                 f"각 캐릭터가 이 결과를 보고 플레이어에게 할 법한 짧은 한마디를 자기 성격과 말투 그대로 한 문장씩 써.")
     schema = {"type": "object",
               "properties": {name: {"type": "string"} for name in chars},
@@ -1937,6 +1940,7 @@ class GameResultRequest(BaseModel):
     player_rank: int = 1                 # 플레이어 순위 (1=1등, 4=꼴등)
     total_players: int = 4
     pass_count: int = 0                  # 플레이어의 패스 횟수
+    highlights: list[str] = []           # 이번 판 명장면(Unity 하이라이트 감지기), 예: ["플레이어 역전", "류 마지막 한 장"]
 
 @app.post("/game/result")
 def report_game_result(req: GameResultRequest):
@@ -1979,7 +1983,7 @@ def _report_game_result(req: GameResultRequest):
     reactions = {}
     if FAST_MODE:
         try:
-            msgs, schema = build_reaction_messages(chars, req.player_rank, rel_by_char)
+            msgs, schema = build_reaction_messages(chars, req.player_rank, rel_by_char, req.highlights)
             raw = ollama_chat(MODEL_NAME, msgs, temperature=0.85,
                               num_predict=(45 if PROMPT_STYLE == "compact" else 80) * len(chars),
                               fmt=schema, kind="reactions")
@@ -2028,12 +2032,17 @@ def _report_game_result(req: GameResultRequest):
                 "winner": req.winner,
                 "player_rank": req.player_rank,
                 "summary": result_desc,
+                "highlights": req.highlights[:6],
             },
             "timestamp": time.time()
         })
         if len(data["events"]) > 50:
             data["events"] = data["events"][-50:]
         _save_data(data)
+
+    # 관계가 바뀌었으니 다음 판의 하이라이트 반응 대사를 새로 만들어 둔다(백그라운드).
+    for c in chars:
+        schedule_reaction_bank(c)
 
     return {
         "result": result_desc,
@@ -2043,6 +2052,105 @@ def _report_game_result(req: GameResultRequest):
             "trust": base_trust,
         }
     }
+
+
+# ========================
+# 카드게임 하이라이트 반응 대사 묶음 (Unity HighlightDirector 가 게임 시작 때 받아 감)
+# ========================
+# (Unity 키, 프롬프트 칸 이름, 상황 설명) — Unity CharacterReactionLines 의 키와 같다
+REACTION_SLOTS = [
+    ("last_card_self",   "내가_마지막한장",     "네가 마지막 한 장만 남았을 때"),
+    ("last_card_player", "플레이어_마지막한장",  "플레이어가 마지막 한 장만 남았을 때"),
+    ("comeback_self",    "내가_역전",          "네가 뒤처져 있다가 선두로 역전했을 때"),
+    ("comeback_player",  "플레이어_역전",       "플레이어가 너를 제치고 역전했을 때"),
+    ("triple_self",      "내가_3장몰아치기",    "네가 한 번에 3장을 몰아서 내며 끝을 향해 달릴 때"),
+    ("triple_player",    "플레이어_3장몰아치기", "플레이어가 한 번에 3장을 몰아서 냈을 때"),
+    ("stuck_self",       "내가_막힘",          "네가 낼 카드가 없어 계속 패스할 때"),
+    ("stuck_player",     "플레이어_막힘",       "플레이어가 낼 카드가 없어 계속 패스할 때"),
+    ("close_race",       "접전",              "여러 명이 거의 다 끝나 가는 접전일 때"),
+]
+REACTION_BANK_TTL = 3 * 3600           # 이보다 오래된 묶음은 새로 만든다
+_bank_lock = threading.Lock()
+_bank_pending: dict = {}               # 캐릭터 → 예약 시각 (10분 넘게 안 끝나면 다시 예약 가능)
+
+
+def build_reaction_bank_messages(name: str, rel: dict) -> tuple:
+    """캐릭터 한 명의 하이라이트 반응 대사 묶음(상황 9개)을 LLM 1회로 받기 위한 (messages, 스키마)."""
+    system = (f"{COMPACT_RULES}\n\n{character_card(name)}\n\n"
+              f"너는 '{name}'다. 지금 플레이어와 4인 카드게임(세븐)을 하는 중이다.\n"
+              f"플레이어와: {compact_relation(rel)}")
+    user = ("아래 상황마다 네가 플레이어 들으라고 툭 던지는 한마디를 칸에 하나씩 써.\n"
+            + "\n".join(f"{ko}: {desc}" for _, ko, desc in REACTION_SLOTS)
+            + "\n(존댓말 한 문장씩, 상황마다 다르게. 예시 대사를 그대로 쓰지 않는다)")
+    props = {ko: {"type": "string"} for _, ko, _ in REACTION_SLOTS}
+    schema = {"type": "object", "properties": props, "required": list(props)}
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}], schema
+
+
+def parse_reaction_bank(raw: str) -> dict:
+    """응답 JSON → {Unity 키: 대사}. 비었거나 이름만 있는 칸은 뺀다."""
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {}
+    out = {}
+    for key, ko, _ in REACTION_SLOTS:
+        line = clean_line(str(data.get(ko, "")))
+        if line:
+            out[key] = line
+    return out
+
+
+def refresh_reaction_bank(name: str):
+    """(백그라운드) 캐릭터 한 명의 반응 대사 묶음을 새로 만들어 저장."""
+    try:
+        msgs, schema = build_reaction_bank_messages(name, get_relationship("플레이어", name))
+        raw = ollama_chat(MODEL_NAME, msgs, temperature=0.9, num_predict=60 * len(REACTION_SLOTS),
+                          fmt=schema, kind="reaction_bank")
+        lines = parse_reaction_bank(raw)
+        if len(lines) >= len(REACTION_SLOTS) // 2:
+            with _rel_lock:
+                data = _load_data()
+                data.setdefault("reaction_bank", {})[name] = {"lines": lines, "ts": time.time()}
+                _save_data(data)
+        else:
+            print(f"[reaction_bank] {name}: 쓸 만한 대사가 부족해서 버림 ({len(lines)}개)")
+    except Preempted:
+        raise                                   # 작업자가 나중에 다시 시도 → 대기 표시는 유지
+    except Exception as e:
+        print(f"[reaction_bank] {name} 생성 실패: {e}")
+    with _bank_lock:
+        _bank_pending.pop(name, None)
+
+
+def schedule_reaction_bank(name: str) -> bool:
+    """반응 대사 묶음 생성을 백그라운드에 예약(이미 예약돼 있으면 무시). 새로 예약했으면 True."""
+    with _bank_lock:
+        if name in _bank_pending and time.time() - _bank_pending[name] < 600:
+            return False
+        _bank_pending[name] = time.time()
+    submit_background(refresh_reaction_bank, name)
+    return True
+
+
+@app.get("/game/reaction_bank")
+def get_reaction_bank():
+    """카드게임 하이라이트 때 캐릭터가 할 대사 묶음. 지금 있는 것을 바로 돌려주고,
+    없거나 오래된 캐릭터는 백그라운드에서 새로 만든다(pending 에 표시 → Unity가 잠시 뒤 다시 요청)."""
+    with _rel_lock:
+        bank = dict(_load_data().get("reaction_bank", {}))
+    now = time.time()
+    lines, pending = [], []
+    for name in DEFAULT_CHARACTERS:
+        entry = bank.get(name)
+        if entry:
+            lines += [{"character": name, "key": k, "line": v} for k, v in entry.get("lines", {}).items()]
+        if not entry or now - entry.get("ts", 0) > REACTION_BANK_TTL:
+            schedule_reaction_bank(name)
+        with _bank_lock:
+            if name in _bank_pending:
+                pending.append(name)
+    return {"lines": lines, "pending": pending}
 
 
 # ========================
@@ -2157,5 +2265,6 @@ def llm_status():
         "player_requests_in_flight": _prio.active,
         "background_queue": _bg_queue.qsize(),
         "soliloquy_pool": pool,
+        "reaction_bank_pending": sorted(_bank_pending),
         "calls": stats,
     }

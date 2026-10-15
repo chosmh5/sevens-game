@@ -47,6 +47,11 @@ public class CardGameManager : MonoBehaviour
     [SerializeField] private bool         useLobbyDifficulty = true;
     [SerializeField] private string playerName      = "플레이어";
     [SerializeField] private string[] aiNames       = { "상대 1", "상대 2", "상대 3" };
+    [Tooltip("켜면 AI 이름을 마이룸 캐릭터(세비-호/류/진)로 바꾼다. 하이라이트 반응·결과 반응이 이 이름으로 나온다.")]
+    [SerializeField] private bool   useCharacterNames = true;
+
+    /// <summary>오른쪽·위·왼쪽 AI 좌석에 앉는 캐릭터.</summary>
+    public static readonly string[] CharacterNames = { "세비-호", "류", "진" };
 
     [Header("Button Labels")]
     [SerializeField] private string passLabel    = "패스";
@@ -65,6 +70,8 @@ public class CardGameManager : MonoBehaviour
     private OpponentProfile[] _aiProfiles; // index 0..2 → AI player 1..3
     private readonly AiContext _aiCtx = new AiContext(); // 매 AI 호출 직전 재사용
     private readonly Stack<Card> _pendingPlays = new Stack<Card>(); // 이번 턴 사람이 낸 카드(취소용)
+    private readonly List<Card>  _turnPlayed   = new List<Card>();  // 이번 턴에 확정적으로 낸 카드(턴 종료 이벤트용)
+    private float _holdUntil;                                        // 이 시각까지 AI 제출을 잠깐 멈춤(연출용)
 
     public State CurrentState => _state;
     public Player CurrentPlayer => (_players != null && _currentIdx < _players.Length) ? _players[_currentIdx] : null;
@@ -73,6 +80,43 @@ public class CardGameManager : MonoBehaviour
     public event Action<Player, Card> PlayerPlayedCard;
     public event Action<Player>       PlayerPassed;
     public event Action<Player>       GameWon;
+    /// <summary>새 판이 시작됨(패 분배 직후).</summary>
+    public event Action               GameStarted;
+    /// <summary>
+    /// 한 턴이 확정됨(다음 사람으로 넘어가기 직전). 두 번째 인자는 이번 턴에 낸 카드(패스면 빈 목록).
+    /// 사람의 '되돌리기'가 반영된 최종 결과라 하이라이트 판단에 쓴다. 승리로 끝난 턴은 GameWon 만 발생.
+    /// </summary>
+    public event Action<Player, IReadOnlyList<Card>> TurnEnded;
+
+    /// <summary>좌석 수(4).</summary>
+    public int PlayerCount => _players != null ? _players.Length : 0;
+    public int MaxPlaysPerTurn => maxPlaysPerTurn;
+
+    /// <summary>좌석별 남은 손패 수. 0번(사람)은 HandManager 기준.</summary>
+    public int[] GetHandCounts()
+    {
+        if (_players == null) return new int[0];
+        var counts = new int[_players.Length];
+        for (int i = 0; i < _players.Length; i++)
+            counts[i] = (i == 0 && handManager != null) ? handManager.Hand.Count : _players[i].Hand.Count;
+        return counts;
+    }
+
+    public string GetPlayerName(int seat) =>
+        (_players != null && seat >= 0 && seat < _players.Length) ? _players[seat].Name : "";
+
+    public int GetPassCount(int seat) =>
+        (_players != null && seat >= 0 && seat < _players.Length) ? _players[seat].PassCount : 0;
+
+    /// <summary>AI 좌석(1~3)의 프로필 UI. 사람(0)이나 범위 밖이면 null.</summary>
+    public OpponentProfile GetProfile(int seat) =>
+        (_aiProfiles != null && seat >= 1 && seat - 1 < _aiProfiles.Length) ? _aiProfiles[seat - 1] : null;
+
+    /// <summary>연출을 보여줄 시간 동안 AI가 다음 카드를 내지 않고 기다리게 한다.</summary>
+    public void HoldAI(float seconds)
+    {
+        _holdUntil = Mathf.Max(_holdUntil, Time.time + seconds);
+    }
 
     // ─────────────────────────────────────────────────────────────
 
@@ -118,7 +162,10 @@ public class CardGameManager : MonoBehaviour
         _players = new Player[4];
         _players[0] = new Player(0, playerName, false);
         for (int i = 1; i < 4; i++)
-            _players[i] = new Player(i, (i - 1) < aiNames.Length ? aiNames[i - 1] : $"AI {i}", true);
+        {
+            string[] names = useCharacterNames ? CharacterNames : aiNames;
+            _players[i] = new Player(i, (i - 1) < names.Length ? names[i - 1] : $"AI {i}", true);
+        }
 
         // 필드 리셋 + 7 자동 세팅
         fieldManager.ResetField();
@@ -156,6 +203,8 @@ public class CardGameManager : MonoBehaviour
             Debug.Log($"[GameManager] {_players[i]}: {HandPreview(i)}");
 
         _currentIdx = 0;
+        _holdUntil = 0f;
+        GameStarted?.Invoke();
         BeginTurn();
     }
 
@@ -166,6 +215,7 @@ public class CardGameManager : MonoBehaviour
         var p = _players[_currentIdx];
         _playsThisTurn = 0;       // 새 턴 시작 — 카운터 리셋
         _pendingPlays.Clear();    // 이전 턴 제출은 확정됨 — 취소 스택 비움
+        _turnPlayed.Clear();
 
         // 프로필 강조 갱신
         for (int i = 0; i < _aiProfiles.Length; i++)
@@ -202,6 +252,7 @@ public class CardGameManager : MonoBehaviour
         // HandManager가 이미 fieldManager.TryPlace 호출 + 자기 손에서 제거 완료.
         _playsThisTurn++;
         _pendingPlays.Push(card); // 취소 가능하도록 기록
+        _turnPlayed.Add(card);
         PlayerPlayedCard?.Invoke(_players[0], card);
         Debug.Log($"[GameManager] {_players[0].Name} → {card} ({_playsThisTurn}/{maxPlaysPerTurn})");
 
@@ -276,6 +327,7 @@ public class CardGameManager : MonoBehaviour
 
         handManager.ReturnCard(card); // 손패로 복귀(+ 잠금 해제/가용성 갱신)
         _playsThisTurn--;
+        _turnPlayed.Remove(card);
         Debug.Log($"[GameManager] {_players[0].Name} 취소 ← {card} ({_playsThisTurn}/{maxPlaysPerTurn})");
 
         RefreshTurnButton();
@@ -341,6 +393,9 @@ public class CardGameManager : MonoBehaviour
         // 사람과 동일 규칙: 낼 카드가 있으면 첫 장은 의무 제출, 이후 최대 maxPlaysPerTurn까지 선택 제출.
         while (plays < maxPlaysPerTurn)
         {
+            // 하이라이트 연출 중이면 잠깐 기다린다.
+            while (Time.time < _holdUntil) yield return null;
+
             FillAiContext(p, plays);
             Card chosen = _ai.ChooseCard(fieldManager, p.Hand, _aiCtx);
 
@@ -356,6 +411,7 @@ public class CardGameManager : MonoBehaviour
 
             p.Hand.Remove(chosen);
             plays++;
+            _turnPlayed.Add(chosen);
             PlayerPlayedCard?.Invoke(p, chosen);
             Debug.Log($"[GameManager] {p.Name} → {chosen} ({plays}/{maxPlaysPerTurn})");
 
@@ -423,6 +479,10 @@ public class CardGameManager : MonoBehaviour
 
     private void NextTurn()
     {
+        // 턴 확정 알림(하이라이트 감지용). 구독자가 예외를 내도 게임 진행은 막지 않는다.
+        try { TurnEnded?.Invoke(_players[_currentIdx], _turnPlayed.ToArray()); }
+        catch (Exception e) { Debug.LogException(e); }
+
         _currentIdx = (_currentIdx + 1) % _players.Length;
         BeginTurn();
     }
