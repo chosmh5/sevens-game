@@ -11,13 +11,13 @@ EditorBuildSettings:
   - enabled: 1
     path: Assets/sevens/Scenes/CardGame.unity
     guid: 95e7a76657f862242aeb5d03bdc5c927
-  - enabled: 1
+  - enabled: 0
     path: Assets/sevens/Scenes/TitleScreen.unity
     guid: c4a9b56c4d3034447b6c41d041381b5b
-  - enabled: 1
+  - enabled: 0
     path: Assets/sevens/Scenes/Lobby.unity
     guid: 37b591c1a23993d4fa1f7d0e5ac5408e
-  - enabled: 1
+  - enabled: 0
     path: Assets/sevens/Scenes/MyRoom.unity
     guid: f93c1fef8469f8647a3b310f4928fd34
   m_configObjects:
