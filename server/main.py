@@ -213,6 +213,19 @@ COMPACT_RULES = """너는 섬에 사는 캐릭터다. AI 비서가 아니다.
 가장 중요: 상대가 한 말을 먼저 제대로 알아듣고, 그 말에 앞뒤가 맞게 대답한다. 말버릇·허세는 자연스럽게 이어질 때만 쓰고 억지로 끼워 넣지 않는다.
 대화 예는 '이런 말엔 이렇게 받는다'는 참고용이다. 그대로 베끼지 말고 지금 말에 맞게 새로 말한다."""
 
+# 카드게임 대사(하이라이트 반응·시작 첫마디·결과 한마디)에 붙이는 세븐 규칙.
+# 작은 모델이 '카드 뽑기·조커·점수' 같은 다른 게임 규칙을 끌어오거나, 패스를 '일부러 쉬는 것'으로 말하지 않게 한다.
+# Unity 쪽 실제 규칙(CardGameManager·FieldLine)과 맞춰 둔다.
+SEVENS_RULES = """[카드게임 '세븐' 규칙 — 대사는 이 규칙과 어긋나면 안 된다]
+- 4명이 트럼프 카드로 한다. 7 네 장은 처음부터 바닥에 깔려 있고, 나머지 카드를 12장씩 나눠 갖는다.
+- 바닥의 7에서 시작해 같은 문양으로 한 칸씩 이어 낸다(7 옆에 6·8, 그다음 5·9 … 끝은 A와 K). 바로 이어지지 않는 카드는 낼 수 없다.
+- 자기 차례에 낼 수 있는 카드가 있으면 최소 1장은 꼭 내야 하고, 한 차례에 최대 3장까지 낸다.
+- 패스는 낼 수 있는 카드가 하나도 없을 때만 한다(일부러 쉬거나 기다리는 게 아니다).
+- 손패를 가장 먼저 다 털어 낸 사람이 1등. 남은 장수가 적을수록 앞서 있는 것이다.
+- 봉쇄: 다음 칸 카드(예: 7 옆의 6이나 8)를 쥐고 안 내면 그 줄이 막혀, 그 뒤 카드를 가진 사람은 낼 수 없다.
+- 이 게임엔 카드 뽑기·버리기·조커·점수·베팅·족보·트릭·숫자 크기 겨루기가 없다.
+- 손패는 서로 비밀이다. 누가 무슨 카드를 쥐었는지 아는 척하거나 말하지 않는다."""
+
 # examples: (상대, 상대가 한 말, 이 캐릭터의 대답) — 혼자 하는 대사가 아니라 '받아치는' 예시여야
 #   작은 모델이 말투만 흉내 내고 엉뚱한 말을 붙이는 대신, 상대 말에 맞춰 대답하는 법을 따라 한다.
 CHARACTER_CARDS = {
@@ -425,6 +438,7 @@ def remember_exchange(name: str, player_msg: str, reply: str):
                            "ts": time.time()})
         mem["log"] = mem["log"][-MEMORY_LOG_MAX:]
         mem["updated"] = time.time()
+        mem["seed_only"] = False
         _save_data(data)
 
 
@@ -458,7 +472,8 @@ SEED_MEMORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "see
 
 def seed_player_memory(name: Optional[str] = None, only_if_empty: bool = False) -> list:
     """seed_memory.json 의 기본 기억(발표·시연용)으로 덮어쓴다. 넣은 캐릭터 이름 목록을 돌려준다.
-    only_if_empty=True 면 기억이 하나도 없는 캐릭터에만 넣는다(서버 시작 때).
+    only_if_empty=True 면 서버 시작 때용: 기억이 비었거나, 넣은 기본 기억 그대로(대화로 안 바뀜)인 캐릭터만
+    다시 넣는다 → seed_memory.json 을 고친 뒤 서버만 재시작하면 반영된다.
     notes_ts 가 바뀌므로 카드게임 반응 대사 묶음도 새 기억으로 다시 만들어진다."""
     try:
         with open(SEED_MEMORY_PATH, "r", encoding="utf-8") as f:
@@ -476,13 +491,14 @@ def seed_player_memory(name: Optional[str] = None, only_if_empty: bool = False) 
             if n.startswith("_") or n not in DEFAULT_CHARACTERS or (name and n != name):
                 continue
             mem = _mem_entry(data, n)
-            if only_if_empty and (mem["notes"] or mem["log"]):
+            if only_if_empty and (mem["notes"] or mem["log"]) and not mem.get("seed_only"):
                 continue
             log = [l for l in s.get("log", []) if l.get("player")][-MEMORY_LOG_MAX:]
             mem["notes"] = [{"text": t, "ts": now} for t in s.get("notes", []) if t][-MEMORY_NOTES_MAX:]
             mem["log"] = [{"player": l["player"], "reply": l.get("reply", ""), "ts": now - 60 * (len(log) - i)}
                           for i, l in enumerate(log)]
             mem["updated"] = mem["notes_ts"] = now
+            mem["seed_only"] = True    # 플레이어와 대화하면 False(그 뒤엔 시작할 때 덮어쓰지 않음)
             done.append(n)
         if done:
             _save_data(data)
@@ -527,6 +543,7 @@ def extract_memory_note(name: str, convo_text: str):
         mem["notes"].append({"text": note, "ts": time.time()})
         mem["notes"] = mem["notes"][-MEMORY_NOTES_MAX:]
         mem["notes_ts"] = time.time()
+        mem["seed_only"] = False
         _save_data(data)
     print(f"[memory] {name} 기억 +1: {note}")
     schedule_reaction_bank(name, force=True)   # 새 기억을 반영한 반응 대사로 교체
@@ -980,6 +997,7 @@ def call_ollama(speaker_name: str, history: list, user_message: Optional[str] = 
     except Preempted:
         raise
     except Exception as e:
+        print(f"[call_ollama] {speaker_name} 대사 생성 실패 ({MODEL_NAME}): {type(e).__name__}: {e}")
         return f"(응답 오류: {e})"
 
 
@@ -1448,8 +1466,8 @@ def build_reaction_messages(chars: list, player_rank: int, rel_by_char: dict,
             if mem:
                 b += f"\n마이룸에서 플레이어와: {mem}"
             blocks.append(b)
-        system = EXCHANGE_RULES_COMPACT + "\n\n" + "\n\n".join(blocks)
-        user = (f"방금 플레이어가 4인 카드게임에서 {player_rank}등을 했다.{hl} 각자 플레이어에게 할 한마디."
+        system = EXCHANGE_RULES_COMPACT + "\n\n" + SEVENS_RULES + "\n\n" + "\n\n".join(blocks)
+        user = (f"방금 플레이어가 4인 카드게임 세븐에서 {player_rank}등을 했다.{hl} 각자 플레이어에게 할 한마디."
                 " 마이룸에서 나눈 이야기가 있으면 그걸 결과와 엮어서.")
     else:
         blocks = []
@@ -1460,8 +1478,8 @@ def build_reaction_messages(chars: list, player_rank: int, rel_by_char: dict,
             blocks.append(f"[{name}]\n성격: {info['personality']}\n말투: {info['speech_style']}\n"
                           f"플레이어와의 관계: 친밀도 {rel.get('intimacy', 0):+d}, 신뢰 {rel.get('trust', 0)}/100"
                           + (f"\n마이룸에서 플레이어와: {mem}" if mem else ""))
-        system = EXCHANGE_RULES + "\n\n" + "\n\n".join(blocks)
-        user = (f"방금 플레이어가 4명이 하는 카드게임에서 {player_rank}등을 했어.{hl} "
+        system = EXCHANGE_RULES + "\n\n" + SEVENS_RULES + "\n\n" + "\n\n".join(blocks)
+        user = (f"방금 플레이어가 4명이 하는 카드게임 세븐에서 {player_rank}등을 했어.{hl} "
                 f"각 캐릭터가 이 결과를 보고 플레이어에게 할 법한 짧은 한마디를 자기 성격과 말투 그대로 한 문장씩 써.")
     schema = {"type": "object",
               "properties": {name: {"type": "string"} for name in chars},
@@ -2362,7 +2380,7 @@ def game_return_situation(name: str, req: GameReturnRequest) -> str:
         parts.append(f"1등은 {req.winner}")
     result = ", ".join(parts) or "결과 모름"
     hl = f" 명장면: {', '.join(req.highlights[:4])}." if req.highlights else ""
-    return (f"(방금 플레이어와 4인 카드게임 세븐을 한 판 끝내고 마이룸으로 돌아왔다. 결과: {result}.{hl} "
+    return (f"{SEVENS_RULES}\n\n(방금 플레이어와 4인 카드게임 세븐을 한 판 끝내고 마이룸으로 돌아왔다. 결과: {result}.{hl} "
             f"방금 판에 대해 플레이어에게 한마디 해. 명장면이 있으면 하나를 콕 짚어서.)")
 
 
@@ -2391,18 +2409,18 @@ def _game_return(req: GameReturnRequest):
 # ========================
 # (Unity 키, 프롬프트 칸 이름, 상황 설명) — Unity CharacterReactionLines 의 키와 같다
 REACTION_SLOTS = [
-    ("last_card_self",   "내가_마지막한장",     "네가 마지막 한 장만 남았을 때"),
-    ("last_card_player", "플레이어_마지막한장",  "플레이어가 마지막 한 장만 남았을 때"),
-    ("comeback_self",    "내가_역전",          "네가 뒤처져 있다가 선두로 역전했을 때"),
-    ("comeback_player",  "플레이어_역전",       "플레이어가 너를 제치고 역전했을 때"),
-    ("blockade_player",  "플레이어에게_봉쇄당함", "플레이어에게 길이 막혀 네가 어쩔 수 없이 패스했을 때(어떤 카드로 어떻게 막혔는지는 말하지 않는다)"),
-    ("stuck_self",       "내가_막힘",          "네가 낼 카드가 없어 계속 패스할 때"),
-    ("stuck_player",     "플레이어_막힘",       "플레이어가 낼 카드가 없어 계속 패스할 때"),
-    ("close_race",       "접전",              "여러 명이 거의 다 끝나 가는 접전일 때"),
+    ("last_card_self",   "내가_마지막한장",     "네 손패가 딱 한 장 남았을 때(그 카드를 이어 낼 자리가 열리면 네가 1등)"),
+    ("last_card_player", "플레이어_마지막한장",  "플레이어 손패가 딱 한 장 남았을 때(그 카드를 낼 수 있게 되면 플레이어가 1등)"),
+    ("comeback_self",    "내가_역전",          "남은 손패가 더 많아 뒤처져 있다가, 네가 가장 적게 남은 사람이 됐을 때"),
+    ("comeback_player",  "플레이어_역전",       "플레이어가 카드를 몰아 내서 남은 장수로 너를 앞질렀을 때"),
+    ("blockade_player",  "플레이어에게_봉쇄당함", "플레이어가 다음 칸 카드를 쥐고 안 내서 줄이 막혔고, 그 때문에 네가 낼 카드가 없어 패스했을 때(어떤 카드인지는 말하지 않는다)"),
+    ("stuck_self",       "내가_막힘",          "네가 이어 낼 카드가 하나도 없어 연달아 패스할 때(일부러 쉬는 게 아니다. 누가 다음 칸 카드를 쥐고 있을 수도 있다)"),
+    ("stuck_player",     "플레이어_막힘",       "플레이어가 이어 낼 카드가 하나도 없어 연달아 패스할 때(일부러 쉬는 게 아니다)"),
+    ("close_race",       "접전",              "두 명 이상이 손패 1~2장만 남은 접전일 때"),
     ("game_start",       "게임시작",           "게임을 막 시작하며 플레이어에게 건네는 첫마디"),
 ]
 REACTION_BANK_TTL = 3 * 3600           # 이보다 오래된 묶음은 새로 만든다
-REACTION_BANK_VERSION = 4              # 상황 칸이 바뀌면 올린다 → 예전 묶음은 새로 만든다(2: 3장 몰아치기 → 봉쇄, 3: 봉쇄 대사에서 카드 언급 금지, 4: 세비-호 성격 강화)
+REACTION_BANK_VERSION = 6              # 상황 칸이 바뀌면 올린다 → 예전 묶음은 새로 만든다(2: 3장 몰아치기 → 봉쇄, 3: 봉쇄 대사에서 카드 언급 금지, 4: 세비-호 성격 강화, 5: 세븐 규칙 주입, 6: 내가_막힘 다시 추가)
 _bank_lock = threading.Lock()
 _bank_pending: dict = {}               # 캐릭터 → 예약 시각 (10분 넘게 안 끝나면 다시 예약 가능)
 
@@ -2411,6 +2429,7 @@ def build_reaction_bank_messages(name: str, rel: dict, memory: str = "") -> tupl
     """캐릭터 한 명의 하이라이트 반응 대사 묶음(상황 REACTION_SLOTS 개)을 LLM 1회로 받기 위한 (messages, 스키마).
     memory(마이룸에서 나눈 이야기)가 있으면 몇몇 대사가 그걸 짚게 한다."""
     system = (f"{COMPACT_RULES}\n\n{character_card(name)}\n\n"
+              f"{SEVENS_RULES}\n\n"
               f"너는 '{name}'다. 지금 플레이어와 4인 카드게임(세븐)을 하는 중이다.\n"
               f"플레이어와: {compact_relation(rel)}")
     if memory:
@@ -2419,7 +2438,7 @@ def build_reaction_bank_messages(name: str, rel: dict, memory: str = "") -> tupl
                 if memory else "")
     user = ("아래 상황마다 네가 플레이어 들으라고 툭 던지는 한마디를 칸에 하나씩 써.\n"
             + "\n".join(f"{ko}: {desc}" for _, ko, desc in REACTION_SLOTS)
-            + "\n(존댓말 한 문장씩, 상황마다 다르게. 예시 대사를 그대로 쓰지 않는다)" + mem_rule)
+            + "\n(존댓말 한 문장씩, 상황마다 다르게. 예시 대사를 그대로 쓰지 않는다. 세븐 규칙에 맞는 말만 한다)" + mem_rule)
     props = {ko: {"type": "string"} for _, ko, _ in REACTION_SLOTS}
     schema = {"type": "object", "properties": props, "required": list(props)}
     return [{"role": "system", "content": system}, {"role": "user", "content": user}], schema
@@ -2508,7 +2527,7 @@ def _game_pregame(name: str):
     if name not in DEFAULT_CHARACTERS:
         return {"error": f"캐릭터 없음: {name}"}
     mem = memory_context(name, max_notes=3, with_recent=True)
-    system = (f"{COMPACT_RULES}\n\n{character_card(name)}\n\n너는 '{name}'다. 지금 상대: 플레이어\n"
+    system = (f"{COMPACT_RULES}\n\n{character_card(name)}\n\n{SEVENS_RULES}\n\n너는 '{name}'다. 지금 상대: 플레이어\n"
               f"플레이어와: {compact_relation(get_relationship('플레이어', name))}")
     if mem:
         system += f"\n마이룸에서 플레이어와 나눈 이야기: {mem}"

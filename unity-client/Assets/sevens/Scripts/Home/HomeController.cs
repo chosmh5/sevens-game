@@ -32,12 +32,6 @@ public class HomeController : MonoBehaviour
     [SerializeField] private GameObject characterPrefab;
     [SerializeField] private string characterName = HomeSession.MainCharacter;
 
-    [Header("톡 건드리기 — AI 반응")]
-    [Tooltip("클릭할 때 AI 대사를 요청할 확률(나머지는 기본 대사만)")]
-    [SerializeField, Range(0f, 1f)] private float aiPokeChance = 0.35f;
-    [Tooltip("AI 대사 요청 사이 최소 간격(초) — 노트북 CPU 부담 줄이기")]
-    [SerializeField] private float aiPokeCooldown = 15f;
-
     [Header("화면 구도")]
     [SerializeField] private float cameraFov = 24f;
     [Tooltip("머리 꼭대기 위 여백(m)")]
@@ -77,18 +71,36 @@ public class HomeController : MonoBehaviour
         "그렇게 막히니까 좀 분하네요. 아주 조금요.",
         "저를 막고 좋았어요? 다음엔 제가 막을 거예요.",
     };
+    // 톡 건드렸을 때(서버 생성 없이 기본 대사만). 연달아 건드리면 PokeAgainLines 로 점점 짜증.
     private static readonly string[] PokeLines =
     {
         "…뭐예요, 갑자기.",
-        "자꾸 그러면 다음 판에 안 봐줘요.",
         "할 말 있으면 말로 하세요.",
         "흥, 관심 있으면 솔직하게 말해요.",
+        "왜요? 심심해요?",
+        "…불렀어요?",
+        "손 치워요. 집중 안 되잖아요.",
     };
+    private static readonly string[] PokeAgainLines =
+    {
+        "자꾸 그러면 다음 판에 안 봐줘요.",
+        "그만 좀 해요. 진짜로요.",
+        "…한 번만 더 하면 삐질 거예요.",
+        "이럴 시간에 카드나 한 판 해요.",
+    };
+    private string _lastPokeLine;
     private static readonly string[] PlayLines =
     {
         "한 판 하자고요? 좋아요. 후회하지 마요.",
-        "드디어 할 마음이 생겼네요.",
+        "게임 한 판 하실까요?",
         "좋아요. 이번에도 제가 1등이에요.",
+    };
+    // 난이도 창에서 '다음에'(또는 바깥 터치·뒤로가기)로 그냥 나왔을 때
+    private static readonly string[] PlayCancelLines =
+    {
+        "…뭐예요, 안 해요? 겁나서 그런 거면 솔직하게 말해요.",
+        "흥, 다음엔 도망가지 마요.",
+        "알았어요. 기다려 줄게요. 오래는 말고요.",
     };
     // 서버는 연결됐지만 대사 생성(LLM)이 실패했을 때
     private static readonly string[] ErrorLines =
@@ -134,11 +146,6 @@ public class HomeController : MonoBehaviour
     // 톡 건드리기
     private int _pokeCount;            // 짧은 간격으로 연달아 건드린 횟수
     private float _lastPokeTime = -99f;
-    private float _lastAiPokeTime = -99f;
-    private float _lastSayTime;
-    private bool _aiPokePending;       // AI 반응 요청 중
-    private string _aiPokeReady;       // 받아 놨지만 아직 못 보여 준 AI 반응(다음 클릭 때 바로)
-    private int _chatSerial;           // 플레이어가 말을 걸 때마다 +1 — 그 뒤 도착한 반응은 버린다
 
     // ══════════════════════════════════════════════════════════════════
     //  자동 생성
@@ -218,7 +225,7 @@ public class HomeController : MonoBehaviour
         // 안드로이드 뒤로가기 → 열린 창 닫기
         if (Input.GetKeyDown(KeyCode.Escape))
         {
-            if (_difficultyPanel != null && _difficultyPanel.activeSelf) _difficultyPanel.SetActive(false);
+            if (_difficultyPanel != null && _difficultyPanel.activeSelf) CancelDifficulty();
             else if (_memoryPanel != null && _memoryPanel.activeSelf) _memoryPanel.SetActive(false);
             else if (_restoreHud != null && _restoreHud.activeSelf) ShowHud(true);
         }
@@ -632,7 +639,7 @@ public class HomeController : MonoBehaviour
     {
         var card = Modal(parent, "DifficultyPanel", new Vector2(600f, 520f), out _difficultyPanel);
         Title(card, "얼마나 진심으로 할까요?", -32f);
-        Sub(card, "세븐 · 4인전   세비-호 · 류 · 진", -84f);
+        Sub(card, "세븐 · 4인전", -84f);
 
         string[] labels = { "살살", "보통", "진심" };
         string[] notes  = { "EASY", "NORMAL", "HARD" };
@@ -662,7 +669,11 @@ public class HomeController : MonoBehaviour
         var cancel = RetroTheme.Place(RetroTheme.Node("Cancel", card), new Vector2(0.5f, 0f), new Vector2(0.5f, 0f),
                                       new Vector2(0f, 26f), new Vector2(220f, 44f));
         cancel.gameObject.AddComponent<Image>().color = new Color(0, 0, 0, 0);
-        cancel.gameObject.AddComponent<Button>().onClick.AddListener(() => _difficultyPanel.SetActive(false));
+        cancel.gameObject.AddComponent<Button>().onClick.AddListener(CancelDifficulty);
+        // 바깥(어두운 배경) 터치도 '다음에'와 같이 — Modal 의 기본 닫기 대신
+        var dimBtn = _difficultyPanel.GetComponent<Button>();
+        dimBtn.onClick.RemoveAllListeners();
+        dimBtn.onClick.AddListener(CancelDifficulty);
         var cl = RetroTheme.Label(cancel, "Label", "다음에", 22f, RetroTheme.Muted);
         RetroTheme.Stretch((RectTransform)cl.transform);
 
@@ -715,7 +726,6 @@ public class HomeController : MonoBehaviour
     private void Say(string line, BlendShapePreset expr = BlendShapePreset.Neutral)
     {
         StopThinking();
-        _lastSayTime = Time.unscaledTime;
         _fullLine = line ?? "";
         if (_typeCo != null) StopCoroutine(_typeCo);
         _typeCo = StartCoroutine(TypeLine(_fullLine));
@@ -831,8 +841,6 @@ public class HomeController : MonoBehaviour
         _input.text = "";
         _busy = true;
         _playerSpoke = true;
-        _chatSerial++;
-        _aiPokeReady = null;   // 대화로 맥락이 바뀌었으니 묵은 반응은 버린다
         _pendingPlayerMsg = msg;
         HomeSession.MarkTalked();
         StartThinking(msg);
@@ -877,70 +885,12 @@ public class HomeController : MonoBehaviour
         if (_backdrop != null) { _backdrop.Glitch(); _backdrop.Log("poke detected"); }
         if (_gestures != null) _gestures.Play(UnityEngine.Random.value < 0.6f ? VnGesture.LookAway : VnGesture.ArmsCrossed, -1f, false);
 
-        // 전에 받아 두고 못 보여 준 AI 반응이 있으면 바로 쓴다(기다림 없음).
-        if (!string.IsNullOrEmpty(_aiPokeReady))
-        {
-            string ready = _aiPokeReady;
-            _aiPokeReady = null;
-            Say(ready, GuessPokeExpression(ready));
-            return;
-        }
-
-        // 일단 기본 대사 → 가끔 뒤에서 AI 반응을 받아 이어서 말한다(로딩 티 안 나게).
-        Say(Pick(PokeLines), BlendShapePreset.Angry);
-        if (!_aiPokePending && HomeSession.ServerOk && BaseUrl != null
-            && now - _lastAiPokeTime > aiPokeCooldown && UnityEngine.Random.value < aiPokeChance)
-            StartCoroutine(FetchPokeLine(_pokeCount));
-    }
-
-    private static BlendShapePreset GuessPokeExpression(string line)
-    {
-        var e = GuessExpression(line);
-        return e == BlendShapePreset.Neutral ? BlendShapePreset.Angry : e;
-    }
-
-    /// <summary>
-    /// 톡 건드림에 대한 AI 반응. 기본 대사가 다 나오고 한 박자 쉰 뒤 이어서 말한다.
-    /// 그새 플레이어가 말을 걸었으면 버리고, 너무 늦게 왔거나 창이 열려 있으면 다음 클릭 때 쓴다.
-    /// </summary>
-    private IEnumerator FetchPokeLine(int count)
-    {
-        _aiPokePending = true;
-        _lastAiPokeTime = Time.unscaledTime;
-        int serial = _chatSerial;
-        float pokedAt = _lastPokeTime;
-        string line = null;
-
-        string url = $"{BaseUrl}/character/poke?name={UnityWebRequest.EscapeURL(characterName)}&count={count}";
-        using (var req = UnityWebRequest.Get(url))
-        {
-            req.timeout = 30;
-            yield return req.SendWebRequest();
-            if (req.result == UnityWebRequest.Result.Success)
-            {
-                try { line = JsonUtility.FromJson<LineResponse>(req.downloadHandler.text)?.line; } catch { }
-            }
-        }
-        _aiPokePending = false;
-        if (string.IsNullOrWhiteSpace(line) || line.StartsWith("(")) yield break;
-
-        // 기본 대사 타이핑이 끝나고 한 박자 쉴 때까지 기다린다(그새 또 건드리면 그 대사 뒤로).
-        while (_typeCo != null || Time.unscaledTime - _lastSayTime < 1.0f)
-        {
-            if (_chatSerial != serial || _busy) yield break;
-            yield return null;
-        }
-        if (_chatSerial != serial || _busy) yield break;
-
-        // 건드린 지 오래됐고 그 뒤로 안 건드렸으면 뜬금없으니 다음 클릭 때 쓴다.
-        bool late = Time.unscaledTime - pokedAt > 10f && Time.unscaledTime - _lastPokeTime > 4f;
-        bool covered = (_difficultyPanel != null && _difficultyPanel.activeSelf)
-                    || (_memoryPanel != null && _memoryPanel.activeSelf)
-                    || (_restoreHud != null && _restoreHud.activeSelf)
-                    || _thinkCo != null;
-        if (late || covered) { _aiPokeReady = line; yield break; }
-
-        Say(line);   // 내용에 맞는 동작·표정은 VnGesturePlayer 가 고른다
+        // 기본 대사만(서버 생성 없음). 3번째부터는 짜증 대사, 같은 대사 연속은 피한다.
+        var pool = _pokeCount >= 3 ? PokeAgainLines : PokeLines;
+        string line = Pick(pool);
+        if (line == _lastPokeLine) line = Pick(pool);
+        _lastPokeLine = line;
+        Say(line, BlendShapePreset.Angry);
     }
 
     private bool IsOnCharacter(Vector2 screenPos)
@@ -970,6 +920,16 @@ public class HomeController : MonoBehaviour
         }
         // 고르는 동안 세비-호의 게임 시작 첫마디(기억 반영)를 미리 받아 둔다.
         HomeSession.PrefetchGameStartLine();
+    }
+
+    /// <summary>게임 안 하고 난이도 창을 닫음 → 세비-호가 한마디.</summary>
+    private void CancelDifficulty()
+    {
+        if (_difficultyPanel == null || !_difficultyPanel.activeSelf) return;
+        _difficultyPanel.SetActive(false);
+        if (_busy) return;
+        Say(Pick(PlayCancelLines), BlendShapePreset.Angry);
+        if (_gestures != null) _gestures.Play(VnGesture.ArmsCrossed, -1f, false);
     }
 
     private void SelectDifficulty(int idx)
