@@ -1072,25 +1072,17 @@ public class HomeController : MonoBehaviour
 
             int? prev = HomeSession.LastIntimacy;
             HomeSession.LastIntimacy = intimacy;
-            if (prev != intimacy && _backdrop != null)
-                _backdrop.Log(em.Success ? $"mood : {em.Groups[1].Value}" : "status : ok");
             ShowRelation(intimacy);
             if (prev.HasValue && prev.Value != intimacy) ShowRelationDelta(intimacy - prev.Value);
         }
     }
 
-    /// <summary>
-    /// 명패: 하트 5칸 + 단계 + 점수. 하트는 단계(냉랭~아주 친함)와 같은 구간으로 나눠
-    /// '어색함'이면 하트 2칸 반쯤이 아니라 딱 2칸 — 단계가 바뀔 때 하트도 같이 바뀐다.
-    /// </summary>
+    /// <summary>명패: 하트 5칸만(단계 구간 -100~-60 / -20 / 20 / 60 / 100 → 1~5칸).</summary>
     private void ShowRelation(int intimacy)
     {
-        string word = intimacy >= 60 ? "아주 친함" : intimacy >= 20 ? "조금 친함" :
-                      intimacy >= -20 ? "어색함" : intimacy >= -60 ? "껄끄러움" : "냉랭함";
         int hearts = intimacy >= 60 ? 5 : intimacy >= 20 ? 4 : intimacy >= -20 ? 3 : intimacy >= -60 ? 2 : 1;
         _relationText.text = $"<color=#{HexOf(RetroTheme.Pink)}>{new string('♥', hearts)}</color>" +
-                             $"<color=#{HexOf(RetroTheme.Faint)}>{new string('♥', 5 - hearts)}</color> {word}" +
-                             $" <size=18><color=#{HexOf(RetroTheme.Muted)}>{intimacy:+0;-0;0}</color></size>";
+                             $"<color=#{HexOf(RetroTheme.Faint)}>{new string('♥', 5 - hearts)}</color>";
     }
 
     /// <summary>명패 오른쪽에 +2 / -1 을 잠깐 띄운다(위로 살짝 떠오르며 사라짐).</summary>
