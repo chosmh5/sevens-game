@@ -980,6 +980,7 @@ public class HomeController : MonoBehaviour
             req.uploadHandler = new UploadHandlerRaw(Array.Empty<byte>());
             req.downloadHandler = new DownloadHandlerBuffer();
             req.timeout = 60;
+            ServerClient.ApplyUserId(req);   // 사용자별 대화·기억 분리
             yield return req.SendWebRequest();
             if (_playerSpoke || _busy) { StopThinking(); yield break; }   // 그새 플레이어가 먼저 말함
             string line = null;
@@ -1023,6 +1024,7 @@ public class HomeController : MonoBehaviour
             req.downloadHandler = new DownloadHandlerBuffer();
             req.SetRequestHeader("Content-Type", "application/json");
             req.timeout = 60;
+            ServerClient.ApplyUserId(req);   // 사용자별 대화·기억 분리
             yield return req.SendWebRequest();
             if (_playerSpoke || _busy) yield break;   // 그새 플레이어가 먼저 말함(그쪽 응답이 이어서 나온다)
             string line = null;
@@ -1045,6 +1047,7 @@ public class HomeController : MonoBehaviour
         using (var req = UnityWebRequest.Get($"{BaseUrl}/myroom/status"))
         {
             req.timeout = 10;
+            ServerClient.ApplyUserId(req);   // 사용자별 대화·기억 분리
             yield return req.SendWebRequest();
             if (req.result != UnityWebRequest.Result.Success) yield break;
             string json = req.downloadHandler.text;
@@ -1128,6 +1131,7 @@ public class HomeController : MonoBehaviour
         using (var req = UnityWebRequest.Get(url))
         {
             req.timeout = 10;
+            ServerClient.ApplyUserId(req);   // 사용자별 대화·기억 분리
             yield return req.SendWebRequest();
             if (req.result != UnityWebRequest.Result.Success) { _memoryText.text = OfflineLine; yield break; }
             MemoryResponse data = null;
@@ -1161,6 +1165,7 @@ public class HomeController : MonoBehaviour
             req.uploadHandler = new UploadHandlerRaw(Array.Empty<byte>());
             req.downloadHandler = new DownloadHandlerBuffer();
             req.timeout = 10;
+            ServerClient.ApplyUserId(req);   // 사용자별 대화·기억 분리
             yield return req.SendWebRequest();
         }
         StartCoroutine(FetchMemory());

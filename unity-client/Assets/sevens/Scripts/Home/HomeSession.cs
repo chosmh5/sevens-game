@@ -89,6 +89,7 @@ public static class HomeSession
             req.downloadHandler = new DownloadHandlerBuffer();
             req.SetRequestHeader("Content-Type", "application/json");
             req.timeout = 20;
+            ServerClient.ApplyUserId(req);   // 사용자별 대화·기억 분리
             yield return req.SendWebRequest();
             if (req.result == UnityWebRequest.Result.Success) ServerOk = true;
             else Debug.Log($"[HomeSession] 게임 결과 보고 실패 ({req.error})");
@@ -128,6 +129,7 @@ public static class HomeSession
         using (var req = UnityWebRequest.Get(url))
         {
             req.timeout = 90;
+            ServerClient.ApplyUserId(req);   // 사용자별 대화·기억 분리
             yield return req.SendWebRequest();
             if (req.result == UnityWebRequest.Result.Success)
             {

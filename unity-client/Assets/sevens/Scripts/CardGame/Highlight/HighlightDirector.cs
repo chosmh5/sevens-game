@@ -558,6 +558,7 @@ public class HighlightDirector : MonoBehaviour
             using (var req = UnityWebRequest.Get($"{ServerClient.Instance.BaseUrl}/game/reaction_bank"))
             {
                 req.timeout = 8;
+                ServerClient.ApplyUserId(req);   // 사용자별 대화·기억 분리
                 yield return req.SendWebRequest();
                 if (req.result != UnityWebRequest.Result.Success)
                 {

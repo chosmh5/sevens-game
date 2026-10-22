@@ -48,6 +48,65 @@ public class ServerClient : MonoBehaviour
     }
 
     // ══════════════════════════════════════════════════════════════
+    //  사용자 ID — 서버가 사람마다 대화·기억·관계를 따로 저장하도록 모든 요청에 X-User-Id 로 붙인다.
+    //  - 기본값: 기기 고유 ID. 안드로이드는 ANDROID_ID 의 MD5 라서, 같은 폰·같은 서명 키로 빌드한
+    //    위젯 앱(android-app)과 같은 값이 나온다 → 위젯에서 나눈 대화도 같은 기억으로 이어진다.
+    //  - PC 한 대에서 여러 명을 흉내 낼 때: 실행 인자  -userId 이름   (예: SevensGame.exe -userId test2)
+    //  - 기기 ID를 못 얻는 환경이면 처음 한 번 만든 랜덤 ID를 PlayerPrefs 에 저장해 계속 쓴다.
+    // ══════════════════════════════════════════════════════════════
+
+    const string UserIdPrefKey = "sevens_user_id";
+    static string _userId;
+
+    public static string UserId => _userId ??= ResolveUserId();
+
+    static string ResolveUserId()
+    {
+        var args = Environment.GetCommandLineArgs();
+        for (int i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i] != "-userId") continue;
+            var fromArg = SanitizeUserId(args[i + 1]);
+            if (fromArg.Length > 0) return fromArg;
+        }
+
+        var device = SystemInfo.deviceUniqueIdentifier;
+        if (!string.IsNullOrEmpty(device) && device != SystemInfo.unsupportedIdentifier)
+        {
+            var fromDevice = SanitizeUserId(device);
+            if (fromDevice.Length > 0) return fromDevice;
+        }
+
+        var saved = SanitizeUserId(PlayerPrefs.GetString(UserIdPrefKey, ""));
+        if (saved.Length == 0)
+        {
+            saved = Guid.NewGuid().ToString("N");
+            PlayerPrefs.SetString(UserIdPrefKey, saved);
+            PlayerPrefs.Save();
+        }
+        return saved;
+    }
+
+    /// <summary>서버와 같은 규칙: 소문자 영문·숫자·-·_ 만, 최대 64자.</summary>
+    static string SanitizeUserId(string raw)
+    {
+        var sb = new StringBuilder();
+        foreach (char ch in (raw ?? "").ToLowerInvariant())
+        {
+            if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_')
+                sb.Append(ch);
+            if (sb.Length >= 64) break;
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>직접 UnityWebRequest 를 만드는 스크립트(HomeController 등)도 보내기 전에 이걸 불러야 한다.</summary>
+    public static void ApplyUserId(UnityWebRequest req)
+    {
+        req.SetRequestHeader("X-User-Id", UserId);
+    }
+
+    // ══════════════════════════════════════════════════════════════
     //  공통 요청 도우미
     //  - 응답 JSON 이 깨져 있어도 코루틴이 예외로 죽지 않고 onFail 로 넘어간다(예전엔 '생각 중…'에서 멈췄다).
     //  - 실패 원인을 로그로 남긴다.
@@ -62,6 +121,7 @@ public class ServerClient : MonoBehaviour
         req.uploadHandler   = new UploadHandlerRaw(jsonBody == null ? Array.Empty<byte>() : Encoding.UTF8.GetBytes(jsonBody));
         req.downloadHandler = new DownloadHandlerBuffer();
         req.SetRequestHeader("Content-Type", "application/json");
+        ApplyUserId(req);
         req.timeout = timeout;
         return req;
     }
@@ -69,6 +129,7 @@ public class ServerClient : MonoBehaviour
     static UnityWebRequest NewGet(string url, int timeout)
     {
         var req = UnityWebRequest.Get(url);
+        ApplyUserId(req);
         req.timeout = timeout;
         return req;
     }

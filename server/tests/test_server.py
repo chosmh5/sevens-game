@@ -36,6 +36,7 @@ tmp = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
 tmp.write("{}")
 tmp.close()
 main.DATA_PATH = tmp.name
+main.USERS_DIR = tempfile.mkdtemp(prefix="sevens-users-")
 
 failures = []
 
@@ -154,7 +155,7 @@ with TestClient(main.app) as c:
     first_calls = len(calls_since(n))
     expected = 1 if FAST else 2
     check(first_calls == expected, f"soliloquy sync calls = {first_calls} (expected {expected})")
-    ok = wait_for(lambda: main._soliloquy_pool.get("진"), timeout=12)
+    ok = wait_for(lambda: main._st().soliloquy_pool.get("진"), timeout=12)
     check(ok, "pregen filled pool for 진")
     n = len(mock.LOG)
     r2 = c.get("/character/line", params={"name": "진"}).json()
@@ -164,8 +165,8 @@ with TestClient(main.app) as c:
     # 5) 선점: 백그라운드 생성 중 플레이어 요청 → 백그라운드 중단
     mock.STATE["stream_delay"] = 0.15
     with main._pool_lock:
-        main._soliloquy_pool.clear()
-    main._line_requested["세비-호"] = time.time()
+        main._st().soliloquy_pool.clear()
+    main._st().line_requested["세비-호"] = time.time()
     started = wait_for(lambda: any(b.get("stream") and "세비-호" in b["messages"][0]["content"]
                                    for b in mock.LOG[-3:]), timeout=10)
     check(started, "pregen for 세비-호 started (streaming)")
@@ -174,7 +175,7 @@ with TestClient(main.app) as c:
     dt = time.time() - t0
     check(dt < 2.0, f"player request not blocked by background ({dt:.2f}s)")
     time.sleep(0.5)
-    check(not main._soliloquy_pool.get("세비-호"), "preempted pregen did not store a line")
+    check(not main._st().soliloquy_pool.get("세비-호"), "preempted pregen did not store a line")
     mock.STATE["stream_delay"] = 0.0
 
     # 6) JSON 실패 → 예전 방식으로 대체

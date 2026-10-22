@@ -174,7 +174,7 @@ fun ChatScreen() {
 
 private suspend fun fetchHistory(): List<Message> = withContext(Dispatchers.IO) {
     try {
-        val json = URL("$SERVER_URL/conversation?limit=20").readText()
+        val json = serverGetText("/conversation?limit=20")
         val arr = JSONObject(json).getJSONArray("messages")
         (0 until arr.length()).map {
             val obj = arr.getJSONObject(it)
@@ -187,7 +187,7 @@ private suspend fun fetchHistory(): List<Message> = withContext(Dispatchers.IO) 
 
 private suspend fun clearConversation() = withContext(Dispatchers.IO) {
     try {
-        val conn = URL("$SERVER_URL/conversation/clear").openConnection() as java.net.HttpURLConnection
+        val conn = openServer("/conversation/clear")
         conn.requestMethod = "POST"
         conn.responseCode
     } catch (_: Exception) {}
@@ -195,8 +195,7 @@ private suspend fun clearConversation() = withContext(Dispatchers.IO) {
 
 private suspend fun sendMessage(text: String): Message = withContext(Dispatchers.IO) {
     try {
-        val url = URL("$SERVER_URL/conversation/user")
-        val conn = url.openConnection() as HttpURLConnection
+        val conn = openServer("/conversation/user")
         conn.requestMethod = "POST"
         conn.setRequestProperty("Content-Type", "application/json")
         conn.doOutput = true

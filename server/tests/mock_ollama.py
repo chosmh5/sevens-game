@@ -1,4 +1,5 @@
 """Ollama API 흉내 서버 (테스트용). 요청을 기록하고, format(JSON 스키마)이 오면 스키마에 맞는 JSON을 돌려준다."""
+import asyncio
 import json
 import time
 import threading
@@ -78,7 +79,7 @@ async def chat(req: Request):
     stats = {"total_duration": 5e8, "load_duration": 1e6, "prompt_eval_count": 300,
              "prompt_eval_duration": 3e8, "eval_count": 20, "eval_duration": 2e8}
     if STATE["gen_delay"]:
-        time.sleep(STATE["gen_delay"])
+        await asyncio.sleep(STATE["gen_delay"])   # 다른 요청을 막지 않게(동시 사용자 테스트)
     if not body.get("stream"):
         return JSONResponse({"model": body["model"], "message": {"role": "assistant", "content": content},
                              "done": True, **stats})

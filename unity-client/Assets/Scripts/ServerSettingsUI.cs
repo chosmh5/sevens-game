@@ -68,6 +68,7 @@ public class ServerSettingsUI : MonoBehaviour
     {
         _status.text = "연결 확인 중...";
         using var req = UnityWebRequest.Get(ServerClient.Instance.BaseUrl + "/conversation/status");
+        ServerClient.ApplyUserId(req);
         req.timeout = 5;
         yield return req.SendWebRequest();
 
@@ -158,6 +159,15 @@ public class ServerSettingsUI : MonoBehaviour
         cRT.anchorMin = cRT.anchorMax = cRT.pivot = new Vector2(0.5f, 0f);
         cRT.anchoredPosition = new Vector2(0f, 50f);
         cRT.sizeDelta        = new Vector2(680f, 100f);
+
+        // 내 사용자 ID(서버는 이 ID별로 대화·기억을 따로 저장) — 위젯과 기억이 안 이어질 때 비교용
+        var uid = ServerClient.UserId;
+        var idLabel = MakeLabel(box.transform, $"내 ID: {(uid.Length > 12 ? uid.Substring(0, 12) + "…" : uid)}",
+                                20f, new Color(0.55f, 0.55f, 0.6f));
+        var idRT = idLabel.rectTransform;
+        idRT.anchorMin = idRT.anchorMax = idRT.pivot = new Vector2(0.5f, 0f);
+        idRT.anchoredPosition = new Vector2(0f, 10f);
+        idRT.sizeDelta        = new Vector2(760f, 34f);
     }
 
     // ── 헬퍼 ───────────────────────────────────────────────────

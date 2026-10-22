@@ -38,6 +38,7 @@ class SevensWidget : GlanceAppWidget() {
     override val stateDefinition: GlanceStateDefinition<*> = PreferencesGlanceStateDefinition
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
+        UserId.init(context)
         provideContent {
             val prefs = currentState<Preferences>()
             val dialogue = prefs[DIALOGUE_KEY] ?: ""
@@ -103,9 +104,10 @@ class FetchDialogueAction : ActionCallback {
         glanceId: GlanceId,
         parameters: ActionParameters
     ) {
+        UserId.init(context)
         val line = withContext(Dispatchers.IO) {
             try {
-                val json = URL("$SERVER_URL/character/line").readText()
+                val json = serverGetText("/character/line")
                 JSONObject(json).getString("line")
             } catch (e: Exception) {
                 "..."

@@ -51,6 +51,7 @@ data class EventSummary(
 class MyRoomActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        UserId.init(this)
         setContent {
             SevensWidgetTheme {
                 MyRoomScreen()
@@ -286,7 +287,7 @@ fun EventItem(ev: EventSummary) {
 
 private suspend fun fetchMyRoomStatus(): Pair<List<CharRelation>, List<EventSummary>> =
     withContext(Dispatchers.IO) {
-        val json = URL("$SERVER_URL/myroom/status").readText()
+        val json = serverGetText("/myroom/status")
         val root = JSONObject(json)
 
         // player_relations 파싱

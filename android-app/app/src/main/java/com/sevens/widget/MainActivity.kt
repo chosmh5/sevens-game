@@ -27,6 +27,7 @@ private val CARD_MAIN = Color(0xFF16213E)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        UserId.init(this)
         enableEdgeToEdge()
         setContent {
             SevensWidgetTheme {

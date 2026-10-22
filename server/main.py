@@ -10,6 +10,8 @@ import json
 import os
 import random
 import shutil
+import contextvars
+from urllib.parse import parse_qs
 
 
 @asynccontextmanager
@@ -97,6 +99,110 @@ PREGEN_SOLILOQUY = os.getenv("SEVENS_PREGEN", "1") == "1"
 # -1 = 무제한 상주. 메모리가 빠듯하면 "30m" 같은 값으로.
 OLLAMA_KEEP_ALIVE = -1
 DATA_PATH = os.path.join(os.path.dirname(__file__), "data.json")
+
+# ========================
+# 사용자 구분 — 여러 사람이 한 서버를 써도 대화·기억·관계가 섞이지 않게
+#   클라이언트(Unity·위젯)가 요청마다 X-User-Id 헤더(또는 ?user_id=)로 자기 ID를 보낸다.
+#   ID가 없으면 "default" — 예전처럼 server/data.json 을 쓴다(혼자 테스트할 때·이전 데이터 호환).
+#   다른 사용자는 server/users/<ID>.json 에 따로 저장한다.
+# ========================
+USERS_DIR = os.path.join(os.path.dirname(__file__), "users")
+DEFAULT_USER = "default"
+_current_user: contextvars.ContextVar = contextvars.ContextVar("sevens_user", default=DEFAULT_USER)
+
+
+def normalize_user_id(raw) -> str:
+    """파일 이름으로 써도 안전하게 소문자 영문·숫자·-·_ 만 남긴다(최대 64자). 비면 default.
+    소문자로 맞추는 건 Windows 파일 이름이 대소문자를 구분하지 않기 때문(ABC.json == abc.json)."""
+    uid = "".join(ch for ch in str(raw or "").lower() if ch.isascii() and (ch.isalnum() or ch in "-_"))[:64]
+    return uid or DEFAULT_USER
+
+
+def current_user() -> str:
+    return _current_user.get()
+
+
+@contextmanager
+def as_user(uid: str):
+    """이 블록 안의 코드(백그라운드 작업 등)를 해당 사용자 기준으로 실행."""
+    token = _current_user.set(uid)
+    try:
+        yield
+    finally:
+        _current_user.reset(token)
+
+
+def _data_path() -> str:
+    uid = current_user()
+    if uid == DEFAULT_USER:
+        return DATA_PATH
+    return os.path.join(USERS_DIR, f"{uid}.json")
+
+
+class UserState:
+    """사용자 한 명의 메모리 상태(서버를 끄면 사라지는 것들). 오래 남길 것은 data.json 쪽."""
+    def __init__(self):
+        self.history: list = []              # 방금 오간 대화(최근 100줄)
+        self.active: list = ["세비-호"]        # 지금 대화 중인 캐릭터
+        self.speaker_index = 0
+        self.pending_topic: Optional[str] = None   # 플레이어가 방금 꺼낸 화제 — 다음 관전 대화에서 1회 강제 소비
+        self.soliloquy_pool: dict = {}       # 캐릭터 → [(미리 만든 혼잣말, 만든 시각)]
+        self.line_requested: dict = {}       # 캐릭터 → 마지막 /character/line 요청 시각
+        self.loop_running = False
+
+
+_states: dict = {}
+_states_lock = threading.Lock()
+
+
+def _st(uid: Optional[str] = None) -> UserState:
+    uid = uid or current_user()
+    with _states_lock:
+        st = _states.get(uid)
+        if st is None:
+            st = _states[uid] = UserState()
+        return st
+
+
+_ready_users: set = set()
+
+
+def _ensure_user_ready(uid: str):
+    """처음 보는 사용자면 발표용 기본 기억(seed_memory.json)을 넣어 준다(서버 시작 때 default 가 받는 것과 같게)."""
+    if uid in _ready_users:
+        return
+    _ready_users.add(uid)
+    if uid != DEFAULT_USER and os.getenv("SEVENS_SEED_MEMORY", "1") == "1":
+        with as_user(uid):
+            seed_player_memory(only_if_empty=True)
+
+
+class UserContextMiddleware:
+    """요청마다 X-User-Id 헤더(없으면 ?user_id=)를 읽어 현재 사용자로 설정한다.
+    (순수 ASGI 미들웨어라 동기 엔드포인트가 도는 스레드까지 contextvar 가 그대로 전달된다.)"""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        raw = None
+        for k, v in scope.get("headers", []):
+            if k == b"x-user-id":
+                raw = v.decode("latin-1")
+                break
+        if raw is None:
+            raw = (parse_qs(scope.get("query_string", b"").decode("latin-1")).get("user_id") or [None])[0]
+        uid = normalize_user_id(raw)
+        token = _current_user.set(uid)
+        try:
+            _ensure_user_ready(uid)
+            await self.app(scope, receive, send)
+        finally:
+            _current_user.reset(token)
+
+
+app.add_middleware(UserContextMiddleware)
 
 # 모든 캐릭터가 공통으로 쓰는 고정 규칙.
 # system 프롬프트 맨 앞에 항상 동일 문자열로 두어 Ollama의 prefix KV 캐시 적중률을 높인다.
@@ -308,19 +414,20 @@ def _read_json(path: str):
 def _load_data() -> dict:
     """data.json 읽기. 파일이 깨져 있으면 그대로 덮어쓰지 않도록 따로 보관하고 백업(.bak)에서 복구한다.
     (예전에는 깨진 파일을 빈 데이터로 읽은 뒤 다음 저장 때 덮어써서 관계·기억이 전부 날아갔다.)"""
+    path = _data_path()
     data = {}
-    if os.path.exists(DATA_PATH):
+    if os.path.exists(path):
         try:
-            data = _read_json(DATA_PATH)
+            data = _read_json(path)
         except Exception as e:
-            broken = f"{DATA_PATH}.broken-{int(time.time())}"
+            broken = f"{path}.broken-{int(time.time())}"
             try:
-                os.replace(DATA_PATH, broken)
-                print(f"[data] data.json 을 읽지 못해 {os.path.basename(broken)} 로 옮겨 둠: {e}")
+                os.replace(path, broken)
+                print(f"[data] {os.path.basename(path)} 을 읽지 못해 {os.path.basename(broken)} 로 옮겨 둠: {e}")
             except OSError:
                 pass
             try:
-                data = _read_json(DATA_PATH + ".bak")
+                data = _read_json(path + ".bak")
                 print("[data] data.json.bak 에서 복구함")
             except Exception:
                 data = {}
@@ -333,14 +440,16 @@ def _load_data() -> dict:
 def _save_data(data: dict):
     """임시 파일에 다 쓴 뒤 한 번에 바꿔치기(os.replace) → 저장 도중 서버가 꺼져도 파일이 반쯤 쓰인 채로 남지 않는다.
     저장한 내용은 data.json.bak 에도 복사해 두어, 밖에서 data.json 이 망가져도 복구할 수 있게 한다."""
-    tmp = DATA_PATH + ".tmp"
+    path = _data_path()
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, DATA_PATH)
+    os.replace(tmp, path)
     try:
-        shutil.copyfile(DATA_PATH, DATA_PATH + ".bak")
+        shutil.copyfile(path, path + ".bak")
     except OSError:
         pass
 
@@ -667,7 +776,7 @@ def interactive():
             _prio.last = time.time()
         # 대화로 맥락이 바뀌었으니 미리 만들어 둔 혼잣말은 버린다.
         with _pool_lock:
-            _soliloquy_pool.clear()
+            _st().soliloquy_pool.clear()
 
 
 # 호출 통계(/llm/status 에서 확인)
@@ -922,7 +1031,7 @@ def build_character_messages(speaker_name: str, history: list, user_message: Opt
     """캐릭터 한 명의 대사를 만들기 위한 messages. (bench_models.py 도 이 함수를 그대로 쓴다)"""
     char = DEFAULT_CHARACTERS[speaker_name]
     if talk_target is None:
-        others = [c for c in active_characters if c != speaker_name]
+        others = [c for c in _st().active if c != speaker_name]
         talk_target = ", ".join(others) if others else "플레이어(유저)"
 
     if PROMPT_STYLE == "compact":
@@ -1425,7 +1534,7 @@ def generate_exchange_single(a: str, b: str, turns: int, forced_topic: Optional[
     rel_desc, recent_ctx, topic_ctx = _world_context(a, b)
     compact = PROMPT_STYLE == "compact"
     with _conv_lock:
-        recent = [h for h in conversation_history[-(3 if compact else 6):] if h.get("speaker") != "상황"]
+        recent = [h for h in _st().history[-(3 if compact else 6):] if h.get("speaker") != "상황"]
     history_text = "\n".join(f"{h['speaker']}: {h['message'][:60] if compact else h['message']}" for h in recent)
 
     seed = None
@@ -1544,8 +1653,8 @@ def run_autonomous_event(char_a: str, char_b: str, turns: int = 3) -> list:
             event_history += [{"speaker": l["speaker"], "message": l["line"], "timestamp": now}
                               for l in res["lines"]]
             with _conv_lock:
-                conversation_history.extend(event_history[1:])
-                del conversation_history[:-100]
+                _st().history.extend(event_history[1:])
+                del _st().history[:-100]
             # 예전 판정(친밀도 -10~10, 신뢰 -5~5)과 비슷한 폭이 되도록 환산
             delta_i, delta_t = res["delta"] * 3, (1 if res["delta"] > 0 else -1 if res["delta"] < 0 else 0)
             update_relationship(char_a, char_b, delta_i, delta_t, res["emotion"], res["summary"])
@@ -1567,7 +1676,7 @@ def run_autonomous_event(char_a: str, char_b: str, turns: int = 3) -> list:
     random.shuffle(speakers)
 
     with _conv_lock:
-        local_history = list(conversation_history[-8:])
+        local_history = list(_st().history[-8:])
     local_history.append({"speaker": "상황", "message": situation})
 
     for i in range(turns):
@@ -1578,9 +1687,9 @@ def run_autonomous_event(char_a: str, char_b: str, turns: int = 3) -> list:
         event_history.append(entry)
         local_history.append(entry)
         with _conv_lock:
-            conversation_history.append(entry)
-            if len(conversation_history) > 100:
-                conversation_history.pop(0)
+            _st().history.append(entry)
+            if len(_st().history) > 100:
+                _st().history.pop(0)
 
         time.sleep(1)
 
@@ -1611,18 +1720,11 @@ def _log_event(situation: str, chars: list, dialogue: list, result: dict):
 # ========================
 # 대화 상태
 # ========================
-conversation_history = []
-active_characters = ["세비-호"]
-is_loop_running = False
-current_speaker_index = 0
 _loop_lock = threading.Lock()
-_conv_lock = threading.Lock()  # ★ conversation_history 스레드 안전 보호
-_pending_topic = None          # 플레이어가 방금 꺼낸 화제 — 다음 관전 대화에서 1회 강제 소비
+_conv_lock = threading.Lock()  # ★ 사용자별 대화 기록(_st().history) 스레드 안전 보호
 
 # 혼잣말 미리 만들어 두기
 _pool_lock = threading.Lock()
-_soliloquy_pool: dict = {}     # 캐릭터 → [(대사, 만든 시각)]
-_line_requested: dict = {}     # 캐릭터 → 마지막 /character/line 요청 시각
 POOL_TTL = 180                 # 이보다 오래된 혼잣말은 버림(맥락이 낡음)
 PREGEN_WINDOW = 60             # 최근 이 시간 안에 요청이 있었던 캐릭터만 미리 만듦
 
@@ -1634,8 +1736,9 @@ _bg_started = False
 
 
 def submit_background(fn, *args):
-    """응답을 돌려준 뒤에 해도 되는 LLM 작업(예: 관계 판정)을 저우선 큐에 넣는다."""
-    _bg_queue.put((fn, args, 0))
+    """응답을 돌려준 뒤에 해도 되는 LLM 작업(예: 관계 판정)을 저우선 큐에 넣는다.
+    요청한 사용자 ID를 같이 넣어, 작업자 스레드에서도 그 사용자의 데이터에 기록되게 한다."""
+    _bg_queue.put((fn, args, 0, current_user()))
 
 
 def _make_soliloquy(char_name: str) -> str:
@@ -1645,37 +1748,42 @@ def _make_soliloquy(char_name: str) -> str:
     else:
         situation = generate_soliloquy_prompt(char_name)
     with _conv_lock:
-        recent = list(conversation_history[-6:])
+        recent = list(_st().history[-6:])
     return call_ollama(char_name, recent, user_message=situation)
 
 
 def _pregen_one():
-    """혼잣말 풀이 빈 캐릭터 하나를 골라 한 줄 미리 만든다(한 번에 하나)."""
+    """혼잣말 풀이 빈 (사용자, 캐릭터) 하나를 골라 한 줄 미리 만든다(한 번에 하나)."""
     if not PREGEN_SOLILOQUY or _prio.busy(quiet=3.0):
         return
     now = time.time()
+    with _states_lock:
+        states = list(_states.items())
+    targets = []                                  # (요청 시각, 사용자, 캐릭터)
     with _pool_lock:
-        for name in list(_soliloquy_pool):
-            _soliloquy_pool[name] = [p for p in _soliloquy_pool[name] if now - p[1] < POOL_TTL]
-        targets = [n for n, t in _line_requested.items()
-                   if now - t < PREGEN_WINDOW and not _soliloquy_pool.get(n)]
+        for uid, st in states:
+            for name in list(st.soliloquy_pool):
+                st.soliloquy_pool[name] = [p for p in st.soliloquy_pool[name] if now - p[1] < POOL_TTL]
+            targets += [(t, uid, n) for n, t in st.line_requested.items()
+                        if now - t < PREGEN_WINDOW and not st.soliloquy_pool.get(n)]
     if not targets:
         return
-    name = min(targets, key=lambda n: _line_requested[n])   # 가장 오래 기다린 캐릭터부터
-    try:
-        line = _make_soliloquy(name)
-    except Preempted:
-        return
-    if line and not line.startswith("("):
-        with _pool_lock:
-            _soliloquy_pool.setdefault(name, []).append((line, time.time()))
+    _, uid, name = min(targets)                   # 가장 오래 기다린 것부터
+    with as_user(uid):
+        try:
+            line = _make_soliloquy(name)
+        except Preempted:
+            return
+        if line and not line.startswith("("):
+            with _pool_lock:
+                _st().soliloquy_pool.setdefault(name, []).append((line, time.time()))
 
 
 def _bg_worker():
     _tls.background = True        # 이 스레드의 LLM 호출은 플레이어 요청이 오면 양보한다
     while True:
         try:
-            fn, args, tries = _bg_queue.get(timeout=1.0)
+            fn, args, tries, uid = _bg_queue.get(timeout=1.0)
         except queue.Empty:
             try:
                 _pregen_one()
@@ -1684,13 +1792,14 @@ def _bg_worker():
             continue
         while _prio.busy():
             time.sleep(0.3)
-        try:
-            fn(*args)
-        except Preempted:
-            if tries < 5:
-                _bg_queue.put((fn, args, tries + 1))   # 나중에 다시
-        except Exception as e:
-            print(f"[background] {getattr(fn, '__name__', fn)} 실패: {e}")
+        with as_user(uid):
+            try:
+                fn(*args)
+            except Preempted:
+                if tries < 5:
+                    _bg_queue.put((fn, args, tries + 1, uid))   # 나중에 다시
+            except Exception as e:
+                print(f"[background] {getattr(fn, '__name__', fn)} ({uid}) 실패: {e}")
 
 
 def _start_background_worker():
@@ -1703,16 +1812,15 @@ def _start_background_worker():
 # 자율 루프
 # ========================
 def autonomous_loop(interval_seconds: int):
-    global current_speaker_index, is_loop_running
-    is_loop_running = True
+    """사용자 한 명의 자율 루프. start_loop 가 그 사용자의 컨텍스트로 스레드를 띄운다."""
     _tls.background = True        # 자율 루프도 플레이어 요청이 오면 양보
 
-    while is_loop_running:
+    while _st().loop_running:
         time.sleep(interval_seconds)
-        if not is_loop_running:
+        if not _st().loop_running:
             break
 
-        chars = list(active_characters)
+        chars = list(_st().active)
         if len(chars) < 2:
             continue
 
@@ -1732,9 +1840,9 @@ def autonomous_loop(interval_seconds: int):
             except Preempted:
                 continue
             with _conv_lock:
-                conversation_history.append({"speaker": speaker, "message": line, "timestamp": time.time()})
-                if len(conversation_history) > 100:
-                    conversation_history.pop(0)
+                _st().history.append({"speaker": speaker, "message": line, "timestamp": time.time()})
+                if len(_st().history) > 100:
+                    _st().history.pop(0)
 
 loop_thread = None
 
@@ -1746,34 +1854,36 @@ loop_thread = None
 def root():
     return {
         "status": "ok",
-        "loop_running": is_loop_running,
-        "active_characters": active_characters
+        "user": current_user(),
+        "loop_running": _st().loop_running,
+        "active_characters": _st().active
     }
 
 @app.post("/loop/start")
 def start_loop(interval: int = 30):
-    global loop_thread, is_loop_running
-    if len(active_characters) < 2:
+    global loop_thread
+    if len(_st().active) < 2:
         return {"error": "자동 루프는 캐릭터 2명 이상 필요"}
-    if is_loop_running:
+    if _st().loop_running:
         return {"message": "이미 실행 중"}
-    loop_thread = threading.Thread(target=autonomous_loop, args=(interval,), daemon=True)
+    _st().loop_running = True
+    ctx = contextvars.copy_context()           # 이 요청의 사용자 ID 를 루프 스레드로 넘긴다
+    loop_thread = threading.Thread(target=ctx.run, args=(autonomous_loop, interval), daemon=True)
     loop_thread.start()
     return {"message": f"루프 시작 ({interval}초 간격)"}
 
 @app.post("/loop/stop")
 def stop_loop():
-    global is_loop_running
-    is_loop_running = False
+    _st().loop_running = False
     return {"message": "루프 중지"}
 
 @app.get("/conversation")
 def get_conversation(limit: int = 5):
     with _conv_lock:
-        msgs = list(conversation_history[-limit:])
+        msgs = list(_st().history[-limit:])
     return {
         "messages": msgs,
-        "active_characters": active_characters
+        "active_characters": _st().active
     }
 
 class UserMessageRequest(BaseModel):
@@ -1787,24 +1897,23 @@ def user_message(req: UserMessageRequest):
 
 
 def _user_message(req: UserMessageRequest):
-    global active_characters
-    # ★ target 을 무조건 존중한다(자동 대화가 active_characters 를 덮어써도 안 흔들리게).
+    # ★ target 을 무조건 존중한다(자동 대화가 active 목록을 덮어써도 안 흔들리게).
     #   target 이 없을 때만 기존 active[0] 로 폴백.
     responder = req.target if req.target in DEFAULT_CHARACTERS else (
-        active_characters[0] if active_characters else None)
+        _st().active[0] if _st().active else None)
     if responder is None:
         return {"speaker": "", "reply": "(응답할 캐릭터가 없습니다)"}
 
     # 이후 맥락(call_ollama 의 talk_target 등)을 이 캐릭터-플레이어 1:1 로 고정.
-    active_characters = [responder]
+    _st().active = [responder]
 
     with _conv_lock:
-        conversation_history.append({
+        _st().history.append({
             "speaker": "플레이어",
             "message": req.message,
             "timestamp": time.time()
         })
-        history_snapshot = list(conversation_history)
+        history_snapshot = list(_st().history)
     # 예전에 나눈 이야기(기억)를 관계 줄에 같이 넣어, 서버를 다시 켜도 이어서 말하게 한다.
     rel_ctx = compact_relation(get_relationship("플레이어", responder))
     mem = memory_context(responder, max_notes=2, with_recent=False, max_len=80)
@@ -1812,8 +1921,8 @@ def _user_message(req: UserMessageRequest):
         rel_ctx += f" / {mem}"
     reply = call_ollama(responder, history_snapshot, req.message, relationship_ctx=rel_ctx, from_player=True)
     with _conv_lock:
-        conversation_history.append({"speaker": responder, "message": reply, "timestamp": time.time()})
-        del conversation_history[:-100]   # 오래 켜 둬도 메모리가 계속 늘지 않게
+        _st().history.append({"speaker": responder, "message": reply, "timestamp": time.time()})
+        del _st().history[:-100]   # 오래 켜 둬도 메모리가 계속 늘지 않게
     convo_text = f"플레이어: {req.message}\n{responder}: {reply}"
     if not reply.startswith("("):
         remember_exchange(responder, req.message, reply)
@@ -1835,32 +1944,31 @@ def group_message(req: GroupMessageRequest):
 
 
 def _group_message(req: GroupMessageRequest):
-    global active_characters
     speakers = [c for c in req.characters if c in DEFAULT_CHARACTERS][:3]
     if not speakers:
         return {"replies": []}
 
-    # call_ollama 가 상대/말투 맥락을 active_characters 로 잡으므로 맞춰 둔다.
-    active_characters = speakers
+    # call_ollama 가 상대/말투 맥락을 _st().active 로 잡으므로 맞춰 둔다.
+    _st().active = speakers
 
     with _conv_lock:
-        conversation_history.append({"speaker": "플레이어", "message": req.message, "timestamp": time.time()})
+        _st().history.append({"speaker": "플레이어", "message": req.message, "timestamp": time.time()})
 
     replies = []
     for sp in speakers:
         others = [c for c in speakers if c != sp]
         rel_ctx = relationship_description(sp, others[0]) if others else None
         with _conv_lock:
-            hist = list(conversation_history)
+            hist = list(_st().history)
         # 플레이어 발화와 앞 캐릭터 대답이 이미 history 에 들어 있으므로 user_message 는 비운다.
         line = call_ollama(sp, hist, relationship_ctx=rel_ctx)
         with _conv_lock:
-            conversation_history.append({"speaker": sp, "message": line, "timestamp": time.time()})
+            _st().history.append({"speaker": sp, "message": line, "timestamp": time.time()})
         replies.append({"speaker": sp, "line": line})
 
     with _conv_lock:
-        while len(conversation_history) > 100:
-            conversation_history.pop(0)
+        while len(_st().history) > 100:
+            _st().history.pop(0)
 
     # 플레이어와 각 캐릭터의 호감도를 대화 내용에 따라 조정(응답 뒤 백그라운드).
     for r in replies:
@@ -1875,12 +1983,11 @@ class SetCharactersRequest(BaseModel):
 
 @app.post("/characters/set")
 def set_characters(req: SetCharactersRequest):
-    global active_characters
     valid = [c for c in req.characters if c in DEFAULT_CHARACTERS]
     if len(valid) < 1:
         return {"error": f"유효한 캐릭터 없음. 사용 가능: {list(DEFAULT_CHARACTERS.keys())}"}
-    active_characters = valid[:3]
-    return {"active_characters": active_characters}
+    _st().active = valid[:3]
+    return {"active_characters": _st().active}
 
 @app.get("/characters")
 def get_characters():
@@ -1888,10 +1995,9 @@ def get_characters():
 
 @app.post("/conversation/clear")
 def clear_conversation():
-    global current_speaker_index
     with _conv_lock:
-        conversation_history.clear()
-    current_speaker_index = 0
+        _st().history.clear()
+    _st().speaker_index = 0
     return {"message": "초기화 완료"}
 
 @app.post("/conversation/next")
@@ -1901,34 +2007,33 @@ def conversation_next():
 
 
 def _conversation_next():
-    global current_speaker_index
-    if not active_characters:
+    if not _st().active:
         return {"error": "활성 캐릭터 없음"}
 
-    speaker = active_characters[current_speaker_index % len(active_characters)]
-    others = [c for c in active_characters if c != speaker]
+    speaker = _st().active[_st().speaker_index % len(_st().active)]
+    others = [c for c in _st().active if c != speaker]
     rel_ctx = relationship_description(speaker, others[0]) if others else None
 
     with _conv_lock:
-        history_snapshot = list(conversation_history)
+        history_snapshot = list(_st().history)
     reply = call_ollama(speaker, history_snapshot, relationship_ctx=rel_ctx)
     with _conv_lock:
-        conversation_history.append({"speaker": speaker, "message": reply, "timestamp": time.time()})
-        if len(conversation_history) > 100:
-            conversation_history.pop(0)
+        _st().history.append({"speaker": speaker, "message": reply, "timestamp": time.time()})
+        if len(_st().history) > 100:
+            _st().history.pop(0)
 
-    current_speaker_index += 1
+    _st().speaker_index += 1
     return {"speaker": speaker, "line": reply}
 
 @app.get("/character/line")
 def get_character_line(name: Optional[str] = None):
-    char_name = name if name in DEFAULT_CHARACTERS else active_characters[0]
+    char_name = name if name in DEFAULT_CHARACTERS else _st().active[0]
     now = time.time()
     with _pool_lock:
-        _line_requested[char_name] = now
-        pool = [p for p in _soliloquy_pool.get(char_name, []) if now - p[1] < POOL_TTL]
+        _st().line_requested[char_name] = now
+        pool = [p for p in _st().soliloquy_pool.get(char_name, []) if now - p[1] < POOL_TTL]
         line = pool.pop(0)[0] if pool else None
-        _soliloquy_pool[char_name] = pool
+        _st().soliloquy_pool[char_name] = pool
     if line is None:
         line = _make_soliloquy(char_name)
     return {"speaker": char_name, "line": line}
@@ -1949,17 +2054,16 @@ def _conversation_exchange(req: ExchangeRequest):
     클라이언트(아래 박스)가 클릭으로 한 줄씩 넘겨 보여주기 위함.
     대사는 서버에서 순차 생성되지만 HTTP 왕복은 1회뿐이라, 플레이어는 한 번만 기다린다.
     char_a가 먼저 말한다(=플레이어가 다가간 캐릭터를 char_a로 넘기면 그 캐릭터가 응답 주체가 됨)."""
-    global active_characters, _pending_topic
     a, b = req.char_a, req.char_b
     if a not in DEFAULT_CHARACTERS or b not in DEFAULT_CHARACTERS or a == b:
         return {"error": f"유효하지 않은 캐릭터 쌍: {a}, {b}"}
 
-    active_characters = [a, b]
+    _st().active = [a, b]
     turns = max(1, min(req.turns, 6))  # 안전 상한
 
     # 플레이어가 방금 꺼낸 화제가 있으면, 이번 대화 첫 발화를 '무조건' 그 주제로 시작시킨다(1회 소비).
-    forced_topic = _pending_topic
-    _pending_topic = None
+    forced_topic = _st().pending_topic
+    _st().pending_topic = None
 
     # ── 빠른 모드: 상황·대사·플레이어에게 건네는 말·관계 판정을 LLM 1회로 ──
     if FAST_MODE:
@@ -1970,10 +2074,10 @@ def _conversation_exchange(req: ExchangeRequest):
             now = time.time()
             with _conv_lock:
                 for l in res["lines"]:
-                    conversation_history.append({"speaker": l["speaker"], "message": l["line"], "timestamp": now})
+                    _st().history.append({"speaker": l["speaker"], "message": l["line"], "timestamp": now})
                 if asker and res["player_question"]:
-                    conversation_history.append({"speaker": asker, "message": res["player_question"], "timestamp": now})
-                del conversation_history[:-100]
+                    _st().history.append({"speaker": asker, "message": res["player_question"], "timestamp": now})
+                del _st().history[:-100]
             update_relationship(a, b, res["delta"], 1 if res["delta"] > 0 else 0, res["emotion"])
             return {"lines": res["lines"], "situation": res["situation"],
                     "player_question": res["player_question"] if asker else "", "mode": "single"}
@@ -1984,7 +2088,7 @@ def _conversation_exchange(req: ExchangeRequest):
 
     speakers = [a, b]
     with _conv_lock:
-        local_history = list(conversation_history[-8:])
+        local_history = list(_st().history[-8:])
 
     lines = []
     for i in range(turns):
@@ -2006,9 +2110,9 @@ def _conversation_exchange(req: ExchangeRequest):
     # 생성된 대화를 전역 히스토리에 커밋(이후 플레이어 응답의 맥락 유지)
     with _conv_lock:
         for l in lines:
-            conversation_history.append({"speaker": l["speaker"], "message": l["line"], "timestamp": time.time()})
-        while len(conversation_history) > 100:
-            conversation_history.pop(0)
+            _st().history.append({"speaker": l["speaker"], "message": l["line"], "timestamp": time.time()})
+        while len(_st().history) > 100:
+            _st().history.pop(0)
 
     # 가끔(35%) 마지막 화자가 옆에서 듣던 플레이어를 향해 말을 건넨다.
     # → 클라이언트는 이 한 줄을 자막 끝에 띄우고 "끼어들기" 대신 "대답하기"로 유도한다.
@@ -2017,7 +2121,7 @@ def _conversation_exchange(req: ExchangeRequest):
         asker = lines[-1]["speaker"]
         other = a if asker == b else b
         with _conv_lock:
-            hist2 = list(conversation_history[-8:])
+            hist2 = list(_st().history[-8:])
         pq_situation = (
             f"방금 {asker}와(과) {other}가 나누던 얘기를 플레이어가 옆에서 듣고 있었다. "
             f"{asker}이(가) 문득 플레이어를 쳐다보며 그 대화에 끌어들이듯 가볍게 말을 걸거나 묻는다. "
@@ -2028,9 +2132,9 @@ def _conversation_exchange(req: ExchangeRequest):
             relationship_ctx=relationship_description(asker, other)).strip()
         if player_question:
             with _conv_lock:
-                conversation_history.append(
+                _st().history.append(
                     {"speaker": asker, "message": player_question, "timestamp": time.time()})
-                del conversation_history[:-100]
+                del _st().history[:-100]
 
     # 두 캐릭터의 호감도를 이 대화 내용에 따라 조정(응답 뒤 백그라운드).
     convo_text = "\n".join(f"{l['speaker']}: {l['line']}" for l in lines)
@@ -2075,7 +2179,7 @@ def get_relationship_pair(char_a: str, char_b: str):
 @app.post("/event/trigger")
 def trigger_event(char_a: Optional[str] = None, char_b: Optional[str] = None, turns: int = 3):
     """수동으로 이벤트 강제 실행 (플레이어가 상황을 만들 때)"""
-    chars = list(active_characters)
+    chars = list(_st().active)
     if len(chars) < 2:
         return {"error": "캐릭터 2명 이상 필요"}
 
@@ -2102,7 +2206,6 @@ class TopicRequest(BaseModel):
 def add_topic(req: TopicRequest):
     """플레이어가 제시한 대화 주제를 저장한다.
     이후 generate_event_situation 이 이 주제를 끌어와 캐릭터들이 관련 대화를 하게 된다."""
-    global _pending_topic
     text = (req.text or "").strip()
     if not text:
         return {"ok": False, "reason": "빈 주제"}
@@ -2115,7 +2218,7 @@ def add_topic(req: TopicRequest):
         data["topics"] = topics
         _save_data(data)
     # 방금 받은 화제는 다음 관전 대화에서 '무조건 한 번' 다루도록 표시한다.
-    _pending_topic = text
+    _st().pending_topic = text
     return {"ok": True, "count": len(topics)}
 
 @app.get("/topics")
@@ -2165,7 +2268,7 @@ def _player_approach(name: str):
 
     # 이 캐릭터의 최근 대화/행동 맥락
     with _conv_lock:
-        recent = [h for h in conversation_history[-8:] if h["speaker"] == name]
+        recent = [h for h in _st().history[-8:] if h["speaker"] == name]
     recent_ctx = "\n".join(f"{h['message']}" for h in recent[-3:]) if recent else ""
 
     # 최근 관계된 이벤트
@@ -2186,17 +2289,17 @@ def _player_approach(name: str):
     situation = approach_situation(name, recent_ctx, event_ctx)
 
     with _conv_lock:
-        recent_hist = list(conversation_history[-6:])
+        recent_hist = list(_st().history[-6:])
     line = call_ollama(name, recent_hist, user_message=situation)
 
     # 대화 히스토리에 남겨서 맥락 유지
     with _conv_lock:
-        conversation_history.append({
+        _st().history.append({
             "speaker": name,
             "message": line,
             "timestamp": time.time()
         })
-        del conversation_history[:-100]
+        del _st().history[:-100]
 
     return {"speaker": name, "line": line}
 
@@ -2205,12 +2308,12 @@ def _player_approach(name: str):
 def conversation_status():
     """Unity가 polling해서 현재 AI 대화 상황을 파악하는 엔드포인트.
     화면 HUD에 '세비-호 ↔ 류 대화 중' 같은 알림을 띄울 때 사용."""
-    is_active = len(active_characters) >= 2
+    is_active = len(_st().active) >= 2
 
     # 최근 30초 이내 메시지가 있으면 "대화 중"으로 판단
     now = time.time()
     with _conv_lock:
-        recent = [h for h in conversation_history[-6:] if now - h.get("timestamp", 0) < 30]
+        recent = [h for h in _st().history[-6:] if now - h.get("timestamp", 0) < 30]
 
     active_speakers = list({h["speaker"] for h in recent if h["speaker"] != "플레이어" and h["speaker"] != "상황"})
 
@@ -2395,12 +2498,12 @@ def _game_return(req: GameReturnRequest):
     if name not in DEFAULT_CHARACTERS:
         return {"error": f"캐릭터 없음: {name}"}
     with _conv_lock:
-        recent_hist = list(conversation_history[-6:])
+        recent_hist = list(_st().history[-6:])
     line = call_ollama(name, recent_hist, user_message=game_return_situation(name, req))
     # 대화 히스토리에 남겨서 이어지는 대화가 방금 판을 기억하게
     with _conv_lock:
-        conversation_history.append({"speaker": name, "message": line, "timestamp": time.time()})
-        del conversation_history[:-100]
+        _st().history.append({"speaker": name, "message": line, "timestamp": time.time()})
+        del _st().history[:-100]
     return {"speaker": name, "line": line}
 
 
@@ -2422,7 +2525,7 @@ REACTION_SLOTS = [
 REACTION_BANK_TTL = 3 * 3600           # 이보다 오래된 묶음은 새로 만든다
 REACTION_BANK_VERSION = 6              # 상황 칸이 바뀌면 올린다 → 예전 묶음은 새로 만든다(2: 3장 몰아치기 → 봉쇄, 3: 봉쇄 대사에서 카드 언급 금지, 4: 세비-호 성격 강화, 5: 세븐 규칙 주입, 6: 내가_막힘 다시 추가)
 _bank_lock = threading.Lock()
-_bank_pending: dict = {}               # 캐릭터 → 예약 시각 (10분 넘게 안 끝나면 다시 예약 가능)
+_bank_pending: dict = {}               # (사용자, 캐릭터) → 예약 시각 (10분 넘게 안 끝나면 다시 예약 가능)
 
 
 def build_reaction_bank_messages(name: str, rel: dict, memory: str = "") -> tuple:
@@ -2480,16 +2583,17 @@ def refresh_reaction_bank(name: str):
     except Exception as e:
         print(f"[reaction_bank] {name} 생성 실패: {e}")
     with _bank_lock:
-        _bank_pending.pop(name, None)
+        _bank_pending.pop((current_user(), name), None)
 
 
 def schedule_reaction_bank(name: str, force: bool = False) -> bool:
     """반응 대사 묶음 생성을 백그라운드에 예약(이미 예약돼 있으면 무시). 새로 예약했으면 True.
     force=True(새 기억이 생김)면 이미 예약돼 있어도 한 번 더 만든다 — 먼저 돈 작업은 옛 기억으로 만들었을 수 있다."""
+    key = (current_user(), name)
     with _bank_lock:
-        if not force and name in _bank_pending and time.time() - _bank_pending[name] < 600:
+        if not force and key in _bank_pending and time.time() - _bank_pending[key] < 600:
             return False
-        _bank_pending[name] = time.time()
+        _bank_pending[key] = time.time()
     submit_background(refresh_reaction_bank, name)
     return True
 
@@ -2511,7 +2615,7 @@ def get_reaction_bank():
         if not entry or now - entry.get("ts", 0) > REACTION_BANK_TTL or stale_memory or old_slots:
             schedule_reaction_bank(name)
         with _bank_lock:
-            if name in _bank_pending:
+            if (current_user(), name) in _bank_pending:
                 pending.append(name)
     return {"lines": lines, "pending": pending}
 
@@ -2706,8 +2810,10 @@ def llm_status():
                      "avg_sec_recent": round(sum(v["recent"]) / len(v["recent"]), 2) if v["recent"] else None,
                      "recent": v["recent"][-10:]}
                  for k, v in _stats.items()}
+    with _states_lock:
+        states = list(_states.items())
     with _pool_lock:
-        pool = {k: len(v) for k, v in _soliloquy_pool.items()}
+        pool = {f"{u}:{k}": len(v) for u, st in states for k, v in st.soliloquy_pool.items()}
     loaded = []
     try:
         loaded = [{"name": m.get("name"),
@@ -2727,6 +2833,8 @@ def llm_status():
         "player_requests_in_flight": _prio.active,
         "background_queue": _bg_queue.qsize(),
         "soliloquy_pool": pool,
-        "reaction_bank_pending": sorted(_bank_pending),
+        "reaction_bank_pending": sorted(f"{u}:{n}" for u, n in _bank_pending),
+        "user": current_user(),
+        "users_in_memory": sorted(u for u, _ in states),
         "calls": stats,
     }
