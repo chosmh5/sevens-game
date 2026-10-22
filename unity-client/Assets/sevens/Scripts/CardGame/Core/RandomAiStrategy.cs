@@ -10,10 +10,9 @@ using System.Collections.Generic;
 ///   유일하게 의미 있는 레버는 "낼 수 있는 만큼 다 내느냐"뿐이다.
 ///   (완벽하게 둬도 승률 상한은 공정 몫 ~25%.)
 ///
-/// 따라서 난이도는 '더 똑똑한 선택'이 아니라 '실수(추가 장 놓침) 빈도'로 표현한다.
-/// - overlookChance = 0.0  → Hard : 절대 안 놓침(완벽, 항상 최대 제출)
-/// - overlookChance = 0.20 → Normal
-/// - overlookChance = 0.55 → Easy : 자주 놓쳐서 사람이 이기기 쉬움
+/// ※ 2026-10-22 정정: 위 결론은 '무작위로 멈추기'만 비교한 결과다. 상황을 보고 골라서 쥐면
+///   (봉쇄) 승률이 약 81%까지 오른다 → BlockadeAiStrategy, docs/block_sim.py.
+///   이 클래스는 이제 Easy(overlookChance 0.20)·Normal(0.0)에만 쓴다.
 ///
 /// 첫 장(ctx.PlaysThisTurn == 0)은 규칙상 의무이므로 절대 놓치지 않는다.
 /// 카드 선택 자체는 승률 무관이라 무작위로 한다.

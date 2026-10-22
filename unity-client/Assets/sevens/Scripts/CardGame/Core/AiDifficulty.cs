@@ -1,12 +1,10 @@
 using UnityEngine;
 
 /// <summary>
-/// AI 난이도. 로비에서 사용자가 선택한다.
-/// 이 게임은 카드 선택이 승률에 무관하므로(시뮬레이션 검증), 난이도는
-/// RandomAiStrategy의 '추가 장 놓침 확률(overlookChance)'로 구현된다.
-/// - Easy   : 자주 놓침(0.55) → 사람이 이기기 쉬움
-/// - Normal : 가끔 놓침(0.20)
-/// - Hard   : 절대 안 놓침(0.0, 완벽 — 승률 상한 ~25%)
+/// AI 난이도. 홈에서 사용자가 선택한다. (docs/block_sim.py 로 검증)
+/// - Easy   : RandomAiStrategy(0.20) — 추가 장을 가끔 무작위로 멈춤
+/// - Normal : RandomAiStrategy(0.0)  — 낼 수 있는 만큼 다 냄
+/// - Hard   : BlockadeAiStrategy     — 상대에게만 길을 열어 주는 카드는 쥐고 버팀(봉쇄)
 /// 매핑은 CardGameManager.CreateStrategy() 참조.
 /// </summary>
 public enum AiDifficulty

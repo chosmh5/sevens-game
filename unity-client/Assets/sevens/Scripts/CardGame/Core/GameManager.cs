@@ -506,18 +506,19 @@ public class CardGameManager : MonoBehaviour
     }
 
     /// <summary>
-    /// 난이도 → 전략 인스턴스.
-    /// 이 게임은 카드 선택이 승률에 무관하므로(시뮬레이션 검증), 난이도는
-    /// '추가 장 놓침 확률(overlookChance)'로 구현한다. Hard는 0(완벽).
+    /// 난이도 → 전략 인스턴스. (docs/block_sim.py, 사람이 '다 내기'로 둘 때 사람 승률)
+    /// - Easy   : 추가 장을 20% 확률로 무작위로 멈춤            → 약 31%
+    /// - Normal : 낼 수 있는 만큼 다 냄                       → 약 25%
+    /// - Hard   : 봉쇄 — 상대에게만 길을 열어 주는 카드는 쥐고 버팀 → 약 9% (사람도 봉쇄하면 약 22%)
     /// </summary>
     private static IAiStrategy CreateStrategy(AiDifficulty d, int seed)
     {
         switch (d)
         {
-            case AiDifficulty.Easy:   return new RandomAiStrategy(seed, 0.55f);
-            case AiDifficulty.Normal: return new RandomAiStrategy(seed, 0.20f);
-            case AiDifficulty.Hard:   return new RandomAiStrategy(seed, 0.00f);
-            default:                  return new RandomAiStrategy(seed, 0.20f);
+            case AiDifficulty.Easy:   return new RandomAiStrategy(seed, 0.20f);
+            case AiDifficulty.Normal: return new RandomAiStrategy(seed, 0.00f);
+            case AiDifficulty.Hard:   return new BlockadeAiStrategy(seed);
+            default:                  return new RandomAiStrategy(seed, 0.00f);
         }
     }
 

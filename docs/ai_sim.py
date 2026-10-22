@@ -11,6 +11,9 @@ unity-client 의 게임 규칙과 전략을 그대로 옮겨, AI vs AI 대전으
      Easy(0.55) → 사람 승률 35.9%, Normal(0.20) → 30.0%, Hard(0.0/완벽) → 25.0%.
 
 실행: python3 ai_sim.py
+
+※ 2026-10-22 정정: 위 결론은 '무작위로 멈추기'만 비교한 것. 골라서 쥐는 봉쇄 전략은
+  승률 약 81% → block_sim.py, BlockadeAiStrategy.cs (Hard 난이도).
 """
 import random
 
