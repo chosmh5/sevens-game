@@ -276,7 +276,7 @@ def _bench_style(model, label, reps, quick, cpu_compare, load_s, info, caps):
             continue
         for rep in range(reps):
             try:
-                out, st, raw = chat(model, messages, 0.85, 64 if compact() else 128)
+                out, st, raw = chat(model, messages, srv.DIALOGUE_TEMP, 64 if compact() else 128)
                 cleaned = srv.clean_line(out)
                 chk = check_line(out, cleaned)
             except Exception as e:
@@ -291,7 +291,7 @@ def _bench_style(model, label, reps, quick, cpu_compare, load_s, info, caps):
             "세비-호", "진", 3, rel("friendly"), "최근 있었던 일: 카드게임 역전승",
             "요즘 플레이어가 꺼낸 화제: 고양이", "", None, asker="진", seed="고양이")
         try:
-            out, st, raw = chat(model, msgs, 0.85, srv.exchange_num_predict(3, True), fmt=schema)
+            out, st, raw = chat(model, msgs, srv.DIALOGUE_TEMP, srv.exchange_num_predict(3, True), fmt=schema)
             parsed = srv.parse_exchange(out, "세비-호", "진", 3)
         except Exception as e:
             out, st, raw, parsed = f"(오류: {e})", {"wall_s": None}, "", None
@@ -321,7 +321,7 @@ def _bench_style(model, label, reps, quick, cpu_compare, load_s, info, caps):
         for i, sp in enumerate(["세비-호", "진", "세비-호"]):
             other = "진" if sp == "세비-호" else "세비-호"
             um = f"[상황] {situation}" if i == 0 else None
-            line, _, _ = chat(model, srv.build_character_messages(sp, hist, um, rel("friendly"), talk_target=other), 0.85,
+            line, _, _ = chat(model, srv.build_character_messages(sp, hist, um, rel("friendly"), talk_target=other), srv.DIALOGUE_TEMP,
                               64 if compact() else 128)
             line = srv.clean_line(line)
             hist.append(H(sp, line))
@@ -339,7 +339,7 @@ def _bench_style(model, label, reps, quick, cpu_compare, load_s, info, caps):
     chars = list(srv.DEFAULT_CHARACTERS)
     msgs, schema = srv.build_reaction_messages(chars, 1, {c: {"intimacy": 10, "trust": 20} for c in chars})
     try:
-        out, st, raw = chat(model, msgs, 0.85, (45 if compact() else 80) * len(chars), fmt=schema)
+        out, st, raw = chat(model, msgs, srv.DIALOGUE_TEMP, (45 if compact() else 80) * len(chars), fmt=schema)
         parsed = json.loads(out)
         reacts = {c: srv.clean_line(str(parsed.get(c, ""))) for c in chars}
         ok_json = all(reacts.values())
@@ -381,7 +381,7 @@ def _bench_style(model, label, reps, quick, cpu_compare, load_s, info, caps):
             load(model, {"num_gpu": 0})
             tps = []
             for _ in range(2):
-                _, st, _ = chat(model, dialogue_cases()[1][3], 0.85, 64 if compact() else 128, extra_opts={"num_gpu": 0})
+                _, st, _ = chat(model, dialogue_cases()[1][3], srv.DIALOGUE_TEMP, 64 if compact() else 128, extra_opts={"num_gpu": 0})
                 tps.append(st)
             cpu = {"wall_s": statistics.median(s["wall_s"] for s in tps),
                    "gen_tps": statistics.median(s["gen_tps"] or 0 for s in tps),

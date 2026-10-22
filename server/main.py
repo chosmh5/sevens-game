@@ -52,18 +52,32 @@ for _k in ("NO_PROXY", "no_proxy"):
 # 2026-10-15 벤치마크(Core Ultra 5 125H, CPU): qwen3.5:4b + 압축 프롬프트가
 #   캐릭터 말투·존댓말이 가장 좋고 대사 1줄 약 4초, NPC 대화 묶음 약 15초(예전 7.8B 방식 약 55초).
 #   더 빠른 쪽이 필요하면 exaone3.5:2.4b(대사 약 3초, 묶음 약 9초, 말투는 덜 또렷함).
-MODEL_NAME  = os.getenv("SEVENS_MODEL", "qwen3.5:4b")
-JUDGE_MODEL = os.getenv("SEVENS_JUDGE_MODEL", "qwen3.5:4b")   # 같은 모델 → 메모리에 하나만 상주
+# 2026-10-19 재측정: gemma4:e4b-it-qat 가 문법·말투·맥락 모두 가장 자연스러움
+#   (대사 1줄 약 5.5초, 묶음 약 20초 — qwen3.5:4b 보다 10~15% 느림, 메모리 약 6GB).
+#   qwen3.5:4b 는 '털동자', '플레이어야' 같은 어색한 표현·반말이 섞이고,
+#   EXAONE 4.0 1.2B·Kanana 2.1B 는 빠르지만 비서 말투(물론이죠!)라 캐릭터가 안 산다.
+#   예전 모델로 돌리려면 환경변수 SEVENS_MODEL=qwen3.5:4b
+MODEL_NAME  = os.getenv("SEVENS_MODEL", "gemma4:e4b-it-qat")
+JUDGE_MODEL = os.getenv("SEVENS_JUDGE_MODEL", MODEL_NAME)   # 같은 모델 → 메모리에 하나만 상주
 
 # 컨텍스트 길이. 프롬프트가 1~2천 토큰이라 4096이면 충분하다.
 # 지정하지 않으면 최신 Ollama는 모델에 따라 훨씬 큰 값을 잡아 메모리·속도를 낭비한다.
 NUM_CTX = int(os.getenv("SEVENS_NUM_CTX", "4096"))
 
+# 샘플링. 작은 모델은 temperature 가 높으면 한국어 조사·어미가 무너지고 엉뚱한 말이 늘어난다.
+#   top_p/top_k 로 확률 낮은 토큰(문법이 깨지는 쪽)을 잘라 낸다.
+#   repeat_penalty 는 1.0(끔): 한국어는 '요·는·이' 같은 조사·어미가 반복되는 게 정상인데,
+#   Ollama 기본값(1.1)은 이걸 깎아 '오늘은 다름이에요?' 같은 어색한 어미를 만들 수 있다.
+DIALOGUE_TEMP = float(os.getenv("SEVENS_TEMP", "0.65"))
+TOP_P = float(os.getenv("SEVENS_TOP_P", "0.8"))
+TOP_K = int(os.getenv("SEVENS_TOP_K", "20"))
+REPEAT_PENALTY = float(os.getenv("SEVENS_REPEAT_PENALTY", "1.0"))
+
 # 빠른 모드(기본 켜짐). 끄면(SEVENS_FAST=0) 예전 방식으로 동작한다.
 #   - NPC 대화 묶음(/conversation/exchange): 상황+대사 N줄+관계 판정을 LLM 1회(JSON)로 생성
 #     (예전: 상황 1회 + 대사 N회 + 판정 1회 = 5~6회)
 #   - 혼잣말(/character/line): 상황 생성 호출 없이 1회로 생성
-#   - 게임 결과 반응(/game/result): 캐릭터 3명 반응을 1회로 생성
+#   - 게임 결과 반응(/game/result, with_reactions=true 일 때): 캐릭터 3명 반응을 1회로 생성
 FAST_MODE = os.getenv("SEVENS_FAST", "1") == "1"
 
 # 프롬프트 방식.
@@ -189,28 +203,36 @@ DEFAULT_CHARACTERS = {
 # ========================
 COMPACT_RULES = """너는 섬에 사는 캐릭터다. AI 비서가 아니다.
 규칙: 한국어 구어체 존댓말(~요/~죠)로 딱 한 문장. 설명·비서 말투·이름표 금지. 유저는 '플레이어'라고 부른다.
-예시 대사는 말투 참고용이다. 그대로 따라 하지 말고 상황에 맞게 새로 말한다."""
+자기는 '저·제', 상대는 이름이나 '플레이어'로 부른다('나·내가·너·네가' 금지).
+가장 중요: 상대가 한 말을 먼저 제대로 알아듣고, 그 말에 앞뒤가 맞게 대답한다. 말버릇·허세는 자연스럽게 이어질 때만 쓰고 억지로 끼워 넣지 않는다.
+대화 예는 '이런 말엔 이렇게 받는다'는 참고용이다. 그대로 베끼지 말고 지금 말에 맞게 새로 말한다."""
 
+# examples: (상대, 상대가 한 말, 이 캐릭터의 대답) — 혼자 하는 대사가 아니라 '받아치는' 예시여야
+#   작은 모델이 말투만 흉내 내고 엉뚱한 말을 붙이는 대신, 상대 말에 맞춰 대답하는 법을 따라 한다.
 CHARACTER_CARDS = {
     "세비-호": {
         "core": "자신만만한 승부사. 지는 걸 죽기보다 싫어하고, 걱정도 허세로 감춘다.",
-        "voice": "짧고 단정하게. 가끔 자기 자랑을 슬쩍 붙이고, 남 칭찬은 비꼬듯이 한다.",
+        "voice": "짧고 단정하게. 남 칭찬은 비꼬듯이. 자기 자랑은 말이 이어질 때만 슬쩍.",
         "others": "류는 얄미운 라이벌, 진은 속을 모를 사람. 플레이어는 은근히 신경 쓰이지만 티 안 낸다.",
-        "examples": ["이길 줄 알았어요. 저니까요.", "걱정한 거 아니에요. 그냥 확인한 거죠.",
-                     "운이 좋았네요. 다음엔 어림없어요."],
+        "examples": [("플레이어", "어제 게임 아깝게 졌죠?", "아깝긴요, 일부러 봐준 거예요."),
+                     ("플레이어", "오늘 기분 좋아 보여요.", "그렇게 보여요? 뭐, 틀린 말은 아니네요."),
+                     ("류", "또 허세네요.", "허세 아니에요. 그냥 사실이죠.")],
     },
     "류": {
         "core": "말수 적은 관찰자. 감정은 숨기고 핵심만 찌른다.",
         "voice": "열 글자 안팎의 건조한 한마디. 감탄사·느낌표는 안 쓴다.",
         "others": "세비-호의 허세는 꿰뚫어 보지만 굳이 반박 안 한다. 진과는 말없이 통한다.",
-        "examples": ["그럴 줄 알았어요.", "보이는 게 다는 아니죠.", "늦었네요."],
+        "examples": [("플레이어", "오늘 날씨 좋네요.", "그러네요."),
+                     ("플레이어", "무슨 생각해요?", "별거 아니에요."),
+                     ("세비-호", "이번엔 제가 이겨요.", "두고 보죠.")],
     },
     "진": {
         "core": "속을 알 수 없는 예언가 같은 사람. 비밀이 많아 보인다.",
         "voice": "나직하게 말끝을 흐린다(…). 직답 대신 질문이나 비유로 돌려준다.",
         "others": "세비-호의 허세를 재밌어하고 류의 침묵을 존중한다. 플레이어에게 묘하게 관심 있다(이유는 비밀).",
-        "examples": ["재밌는 선택이네요… 이유는 곧 알게 되겠죠.", "그 답, 이미 알고 있지 않아요?",
-                     "오늘은 바람이 말이 많네요…"],
+        "examples": [("플레이어", "뭐 하고 있었어요?", "바람 소리 듣고 있었어요… 플레이어는요?"),
+                     ("플레이어", "제가 이길 것 같아요?", "글쎄요… 그건 플레이어가 더 잘 알지 않아요?"),
+                     ("세비-호", "오늘은 제가 이길 거예요.", "그럴지도요… 오늘은요.")],
     },
 }
 
@@ -221,9 +243,10 @@ def character_card(name: str) -> str:
     if not c:
         info = DEFAULT_CHARACTERS.get(name, {})
         return f"[{name}]\n{info.get('personality', '')[:120]}\n{info.get('speech_style', '')[:120]}"
-    ex = " / ".join(f'"{e}"' for e in c["examples"])
+    ex = "\n".join(f"- {who}: {said} → {name}: {reply}" if not isinstance(e, str) else f"- {e}"
+                    for e in c["examples"] for who, said, reply in [e if not isinstance(e, str) else ("", "", "")])
     return (f"[{name}]\n정체: {c['core']}\n말버릇: {c['voice']}\n"
-            f"주변: {c['others']}\n예: {ex}")
+            f"주변: {c['others']}\n대화 예:\n{ex}")
 
 
 _CLOSENESS = [(60, "아주 친함"), (20, "조금 친함"), (-20, "어색함"), (-60, "껄끄러움")]
@@ -281,7 +304,8 @@ def get_relationship(a: str, b: str) -> dict:
             _save_data(data)
         return data["relationships"][key]
 
-def update_relationship(a: str, b: str, delta_intimacy: int, delta_trust: int, new_emotion: str, milestone: Optional[str] = None):
+def update_relationship(a: str, b: str, delta_intimacy: int, delta_trust: int, new_emotion: Optional[str], milestone: Optional[str] = None):
+    """new_emotion 이 None 이면 감정은 그대로 둔다(예: 게임 결과는 수치만 바꾼다)."""
     with _rel_lock:
         data = _load_data()
         key = _rel_key(a, b)
@@ -294,7 +318,8 @@ def update_relationship(a: str, b: str, delta_intimacy: int, delta_trust: int, n
         })
         rel["intimacy"] = max(-100, min(100, rel["intimacy"] + delta_intimacy))
         rel["trust"]    = max(0,   min(100, rel["trust"]    + delta_trust))
-        rel["emotion"]  = new_emotion
+        if new_emotion:
+            rel["emotion"] = new_emotion
         if milestone:
             rel["milestones"].append({"text": milestone, "time": time.time()})
             if len(rel["milestones"]) > 10:
@@ -328,6 +353,104 @@ def relationship_description(a: str, b: str) -> str:
         recent = milestones[-3:]
         lines.append("최근 있었던 일: " + " / ".join(m["text"] for m in recent))
     return "\n".join(lines)
+
+# ========================
+# 플레이어 기억 — 마이룸(홈)에서 나눈 대화를 캐릭터별로 남겨 카드게임 반응에 쓴다
+#   log  : 원문 대화(최근 MEMORY_LOG_MAX개)
+#   notes: 판정 모델이 뽑은 한 줄 기억(최근 MEMORY_NOTES_MAX개) — 예) "플레이어가 오늘은 꼭 이긴다고 장담함"
+#   서버를 다시 켜도 data.json 에 남는다.
+# ========================
+MEMORY_LOG_MAX = 12
+MEMORY_NOTES_MAX = 6
+MEMORY_RECENT_SEC = 6 * 3600       # 이보다 오래된 원문 대화는 '방금 한 얘기'로 쓰지 않는다
+
+
+def _mem_entry(data: dict, name: str) -> dict:
+    mem = data.setdefault("player_memory", {}).setdefault(name, {})
+    mem.setdefault("log", [])
+    mem.setdefault("notes", [])
+    return mem
+
+
+def remember_exchange(name: str, player_msg: str, reply: str):
+    """플레이어 ↔ 캐릭터 1:1 대화 한 번을 기록."""
+    if not (player_msg or "").strip() or name not in DEFAULT_CHARACTERS:
+        return
+    with _rel_lock:
+        data = _load_data()
+        mem = _mem_entry(data, name)
+        mem["log"].append({"player": player_msg.strip()[:200], "reply": (reply or "").strip()[:200],
+                           "ts": time.time()})
+        mem["log"] = mem["log"][-MEMORY_LOG_MAX:]
+        mem["updated"] = time.time()
+        _save_data(data)
+
+
+def get_player_memory(name: str) -> dict:
+    with _rel_lock:
+        data = _load_data()
+    mem = data.get("player_memory", {}).get(name, {})
+    return {"log": list(mem.get("log", [])), "notes": list(mem.get("notes", [])),
+            "updated": mem.get("updated", 0), "notes_ts": mem.get("notes_ts", 0)}
+
+
+def memory_context(name: str, max_notes: int = 3, with_recent: bool = True, max_len: int = 180) -> str:
+    """프롬프트에 넣을 기억 한 줄. 없으면 빈 문자열.
+    예) '기억: 플레이어가 오늘은 꼭 이긴다고 장담함 / 방금 대화 — 플레이어: "..." 나: "..."'"""
+    mem = get_player_memory(name)
+    parts = []
+    notes = [n["text"] for n in mem["notes"][-max_notes:]]
+    if notes:
+        parts.append("기억: " + " / ".join(notes))
+    if with_recent and mem["log"]:
+        last = mem["log"][-1]
+        age = time.time() - last.get("ts", 0)
+        if age < MEMORY_RECENT_SEC:
+            when = "방금" if age < 1800 else "아까"
+            parts.append(f"{when} 대화 — 플레이어: \"{last['player'][:50]}\" 나: \"{last['reply'][:40]}\"")
+    return " / ".join(parts)[:max_len]
+
+
+MEMORY_SCHEMA = {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}
+
+
+def build_memory_prompt(name: str, convo_text: str, known: list) -> str:
+    known_txt = " / ".join(known) if known else "없음"
+    return (f"다음은 플레이어와 '{name}'의 대화야.\n[대화]\n{convo_text}\n\n"
+            f"[{name}이(가) 이미 기억하는 것] {known_txt}\n\n"
+            f"{name}이(가) 나중에 플레이어와 카드게임을 할 때 꺼낼 만한 것 — 플레이어의 다짐·약속·내기, "
+            f"기분, 좋아하는 것, 플레이어가 {name}에게 한 말 — 을 '플레이어가 ~함' 꼴의 한 줄(25자 이내)로 note 에 써. "
+            "인사·의미 없는 잡담이거나 이미 기억하는 것과 같은 내용이면 빈 문자열.")
+
+
+def extract_memory_note(name: str, convo_text: str):
+    """(백그라운드) 대화에서 기억할 만한 한 줄을 뽑아 저장하고, 반응 대사 묶음을 새로 만들게 한다."""
+    known = [n["text"] for n in get_player_memory(name)["notes"][-4:]]
+    try:
+        out = ollama_chat(JUDGE_MODEL, [{"role": "user", "content": build_memory_prompt(name, convo_text, known)}],
+                          temperature=0.3, num_predict=100, fmt=MEMORY_SCHEMA, kind="memory")
+    except Preempted:
+        raise
+    except Exception as e:
+        print(f"[memory] {name} 기억 추출 실패: {e}")
+        return
+    try:
+        note = str(json.loads(out).get("note", "")).strip()
+    except Exception:
+        note = ""
+    note = _strip_quotes(note).strip()[:40]
+    if len(note) < 4 or note in known or "없음" in note[:4]:
+        return
+    with _rel_lock:
+        data = _load_data()
+        mem = _mem_entry(data, name)
+        mem["notes"].append({"text": note, "ts": time.time()})
+        mem["notes"] = mem["notes"][-MEMORY_NOTES_MAX:]
+        mem["notes_ts"] = time.time()
+        _save_data(data)
+    print(f"[memory] {name} 기억 +1: {note}")
+    schedule_reaction_bank(name, force=True)   # 새 기억을 반영한 반응 대사로 교체
+
 
 # ========================
 # Ollama 호출
@@ -409,7 +532,8 @@ def _model_caps(model: str) -> set:
 
 
 def _model_options(model: str, temperature: float, num_predict: int) -> dict:
-    opts = {"temperature": temperature, "num_predict": num_predict, "num_ctx": NUM_CTX}
+    opts = {"temperature": temperature, "num_predict": num_predict, "num_ctx": NUM_CTX,
+            "top_p": TOP_P, "top_k": TOP_K, "repeat_penalty": REPEAT_PENALTY}
     low = model.lower()
     # EXAONE 4.0 은 비추론 모드에서 temperature 0.6 이하를 권장(한국어 품질).
     if "exaone-4" in low or "exaone4" in low:
@@ -555,6 +679,16 @@ _NAMES_FOR_VOCATIVE = ("류", "진", "세비-호", "세비호")
 _VOCATIVE_TAIL = _re.compile(r"[,\s]+(플레이어|류|진|세비-호)(님|씨|야|아)?$")
 
 
+_JI_ENDINGS = ("겠지", "었지", "았지", "였지", "했지", "됐지", "있지", "없지", "이지", "거지", "하지",
+               "되지", "않지", "아니지", "맞지", "좋지", "알지", "렇지", "잖지", "같지")
+_JA_ENDINGS = ("하자", "가자", "보자", "놀자", "먹자", "치자", "붙자", "걷자", "쉬자")
+
+
+def _has_ss(ch: str) -> bool:
+    """받침이 ㅆ인 글자(왔·봤·갔·했…) — 뒤의 '지'는 어미다."""
+    return bool(ch) and "\uac00" <= ch <= "\ud7a3" and (ord(ch) - 0xAC00) % 28 == 20
+
+
 def _has_batchim(ch: str) -> bool:
     return "\uac00" <= ch <= "\ud7a3" and (ord(ch) - 0xAC00) % 28 != 0
 
@@ -580,9 +714,9 @@ def _politefy_sentence(body: str) -> str:
         if core.endswith(old):
             return core[: -len(old)] + new + tail_ws
     last = core[-1]
-    if last == "지":                               # 하지 → 하죠, 말이지 → 말이죠
+    if last == "지" and (core.endswith(_JI_ENDINGS) or _has_ss(core[-2:-1])):   # 하지 → 하죠, 말이지 → 말이죠 ('편지·어디까지'는 그대로)
         return core[:-1] + "죠" + tail_ws
-    if last == "자":                               # 하자 → 하죠
+    if last == "자" and core.endswith(_JA_ENDINGS):   # 하자 → 하죠 ('남자·의자'는 그대로)
         return core[:-1] + "죠" + tail_ws
     if last == "야" and len(core) >= 2 and not _has_batchim(core[-2]):   # 뭐야 → 뭐예요
         return core[:-1] + "예요" + tail_ws
@@ -591,11 +725,23 @@ def _politefy_sentence(body: str) -> str:
             return core[: -len(old)] + new + tail_ws
     if last == "냐" and len(core) >= 2:            # 대단하냐? → 대단하나요?
         return core[:-1] + "나요" + tail_ws
-    if last == "나" and len(core) >= 2:            # 않나? → 않나요?
+    if last == "나" and len(core) >= 2 and core[-2] in "않있없했었았였겠되하":   # 않나? → 않나요? ('아무나'는 그대로)
         return core + "요" + tail_ws
     if last in _POLITE_ADD_YO:
         return core + "요" + tail_ws
     return body
+
+
+# 존댓말 문장에 섞인 반말 1인칭(나·내가)을 저·제가로. 앞뒤가 한글이 아닐 때만(단어 일부는 안 건드림).
+_PRONOUN_FIX = [(_re.compile(r"(?<![\uac00-\ud7a3])" + old + r"(?![\uac00-\ud7a3])"), new) for old, new in (
+    ("내가", "제가"), ("나도", "저도"), ("나는", "저는"), ("난", "전"), ("나를", "저를"),
+    ("나한테", "저한테"), ("나랑", "저랑"), ("나보다", "저보다"), ("나만", "저만"))]
+
+
+def fix_pronouns(text: str) -> str:
+    for pat, new in _PRONOUN_FIX:
+        text = pat.sub(new, text)
+    return text
 
 
 def politefy(text: str) -> str:
@@ -644,16 +790,35 @@ def clean_line(reply: str) -> str:
         first = _re.split(r'(?<=[.!?。…])\s+', reply, maxsplit=1)[0]
         if 0 < len(first) < len(reply):
             reply = first
-    # 반말 어미 → 존댓말
-    reply = politefy(reply)
+    # 반말 1인칭(나·내가) → 저·제가, 반말 어미 → 존댓말
+    reply = politefy(fix_pronouns(reply))
     # 대사를 통째로 감싸거나 끝에 흘린 따옴표 제거.
     reply = _strip_quotes(reply)
     return reply.strip()
 
 
+HISTORY_MAX_AGE = 15 * 60     # 이보다 오래된 말은 '방금 대화'로 넣지 않는다
+
+
+def _relevant_history(history: list, speaker_name: str, talk_target: str,
+                      player_line: Optional[str] = None, limit: int = 4) -> list:
+    """프롬프트에 넣을 최근 대화. 지금 대화와 상관없는 말은 뺀다(딴소리 방지).
+    - 지금 대화 참가자(나·상대·플레이어)의 말만 — 다른 NPC끼리 나눈 잡담 제외
+    - HISTORY_MAX_AGE 보다 오래된 말 제외
+    - 플레이어가 방금 한 말을 따로 붙일 거면 히스토리 끝의 같은 말은 뺀다(중복 방지)"""
+    allowed = {speaker_name, "플레이어"} | {t.strip() for t in (talk_target or "").split(",")}
+    now = time.time()
+    hist = [h for h in history
+            if h.get("speaker") in allowed and now - h.get("timestamp", now) < HISTORY_MAX_AGE]
+    if (player_line and hist and hist[-1].get("speaker") == "플레이어"
+            and hist[-1].get("message", "").strip() == player_line.strip()):
+        hist = hist[:-1]
+    return hist[-limit:]
+
+
 def build_character_messages(speaker_name: str, history: list, user_message: Optional[str] = None,
                              relationship_ctx: Optional[str] = None,
-                             talk_target: Optional[str] = None) -> list:
+                             talk_target: Optional[str] = None, from_player: bool = False) -> list:
     """캐릭터 한 명의 대사를 만들기 위한 messages. (bench_models.py 도 이 함수를 그대로 쓴다)"""
     char = DEFAULT_CHARACTERS[speaker_name]
     if talk_target is None:
@@ -667,15 +832,25 @@ def build_character_messages(speaker_name: str, history: list, user_message: Opt
         if relationship_ctx:
             system_prompt += f"\n관계: {relationship_ctx}"
         messages = [{"role": "system", "content": system_prompt}]
-        for h in history[-4:]:
+        hist = _relevant_history(history, speaker_name, talk_target,
+                                 user_message if from_player else None)
+        # 플레이어가 방금 한 말은 히스토리에서 떼어 맨 끝에 '이 말에 대답'으로 붙인다.
+        player_line = user_message if (user_message and from_player) else None
+        if not user_message and hist and hist[-1].get("speaker") == "플레이어":
+            player_line = hist.pop()["message"]
+        for h in hist:
             if h["speaker"] == speaker_name:
-                messages.append({"role": "assistant", "content": h["message"][:80]})
+                messages.append({"role": "assistant", "content": h["message"][:120]})
             else:
-                messages.append({"role": "user", "content": f"{h['speaker']}: {h['message'][:80]}"})
-        if user_message:
-            messages.append({"role": "user", "content": user_message})
-        if messages[-1]["role"] == "user":
-            messages[-1] = {"role": "user", "content": messages[-1]["content"] + "\n(존댓말 한 문장으로)"}
+                messages.append({"role": "user", "content": f"{h['speaker']}: {h['message'][:120]}"})
+        if player_line:
+            messages.append({"role": "user", "content":
+                             f"플레이어: {player_line[:200]}\n"
+                             f"(플레이어의 이 말에 바로 대답한다. 다른 화제로 새지 말고, {speaker_name} 말투로 존댓말 한 문장)"})
+        elif user_message:
+            messages.append({"role": "user", "content": user_message + "\n(존댓말 한 문장으로)"})
+        elif messages[-1]["role"] == "user":
+            messages[-1] = {"role": "user", "content": messages[-1]["content"] + "\n(바로 위 말에 이어서 존댓말 한 문장으로)"}
         else:
             messages.append({"role": "user", "content": "(이어서 존댓말 한 문장으로)"})
         return messages
@@ -697,7 +872,8 @@ def build_character_messages(speaker_name: str, history: list, user_message: Opt
 {char['speech_style']}"""
 
     messages = [{"role": "system", "content": system_prompt}]
-    for h in history[-10:]:
+    for h in _relevant_history(history, speaker_name, talk_target,
+                               user_message if from_player else None, limit=10):
         role = "assistant" if h["speaker"] == speaker_name else "user"
         messages.append({"role": role, "content": h["message"]})
     if user_message:
@@ -706,14 +882,16 @@ def build_character_messages(speaker_name: str, history: list, user_message: Opt
 
 
 def call_ollama(speaker_name: str, history: list, user_message: Optional[str] = None,
-                relationship_ctx: Optional[str] = None) -> str:
+                relationship_ctx: Optional[str] = None, from_player: bool = False) -> str:
+    """from_player=True 면 user_message 를 '플레이어가 방금 한 말'로 다룬다(상황 설명이 아니라)."""
     if speaker_name not in DEFAULT_CHARACTERS:
         return "(알 수 없는 캐릭터)"
-    messages = build_character_messages(speaker_name, history, user_message, relationship_ctx)
+    messages = build_character_messages(speaker_name, history, user_message, relationship_ctx,
+                                        from_player=from_player)
     try:
         # num_predict는 상한선(모델은 끝나면 스스로 멈춤).
         # 너무 낮으면 문장이 끝나기 전에 잘리므로, 두 문장이 완성될 만큼 여유를 둔다.
-        reply = ollama_chat(MODEL_NAME, messages, temperature=0.85,
+        reply = ollama_chat(MODEL_NAME, messages, temperature=DIALOGUE_TEMP,
                             num_predict=64 if PROMPT_STYLE == "compact" else 128, kind="dialogue")
         return clean_line(reply)
     except Preempted:
@@ -996,7 +1174,8 @@ def _build_exchange_messages_full(a: str, b: str, turns: int, rel_desc: str, rec
 
 
 EXCHANGE_RULES_COMPACT = """너는 섬 캐릭터들의 대화를 쓰는 작가다.
-대사마다 그 캐릭터의 말버릇 그대로, 한국어 존댓말(~요/~죠) 한 문장. 이름표·따옴표·설명 금지. 유저는 '플레이어'라고 부른다."""
+대사마다 그 캐릭터의 말버릇 그대로, 한국어 존댓말(~요/~죠) 한 문장. 이름표·따옴표·설명 금지. 유저는 '플레이어'라고 부른다.
+자기는 '저·제', 상대는 이름이나 '플레이어'로 부른다('나·내가·너·네가' 금지). 앞 사람 말에 앞뒤가 맞게 받아친다."""
 
 # 두 캐릭터가 나눌 화제 씨앗(LLM으로 상황을 지어내는 대신 코드에서 고른다 → 출력 토큰 절약)
 _PAIR_SEEDS = ["어제 카드게임", "섬의 날씨", "플레이어", "서로의 버릇", "요즘 떠도는 소문",
@@ -1157,7 +1336,7 @@ def generate_exchange_single(a: str, b: str, turns: int, forced_topic: Optional[
                                                forced_topic, asker, with_story, seed)
     num_predict = exchange_num_predict(turns, bool(asker), with_story)
     try:
-        raw = ollama_chat(MODEL_NAME, messages, temperature=0.85, num_predict=num_predict,
+        raw = ollama_chat(MODEL_NAME, messages, temperature=DIALOGUE_TEMP, num_predict=num_predict,
                           fmt=schema, kind="exchange")
     except Preempted:
         raise
@@ -1179,16 +1358,25 @@ def build_reaction_messages(chars: list, player_rank: int, rel_by_char: dict,
     highlights 가 있으면 그 판의 명장면(역전 등)을 짚어서 말하게 한다."""
     hl = f" 이번 판 명장면: {', '.join(highlights[:4])}." if highlights else ""
     if PROMPT_STYLE == "compact":
-        blocks = [f"{character_card(n)}\n플레이어와: {compact_relation(rel_by_char.get(n, {}))}" for n in chars]
+        blocks = []
+        for n in chars:
+            b = f"{character_card(n)}\n플레이어와: {compact_relation(rel_by_char.get(n, {}))}"
+            mem = memory_context(n, max_notes=2, with_recent=True, max_len=120)
+            if mem:
+                b += f"\n마이룸에서 플레이어와: {mem}"
+            blocks.append(b)
         system = EXCHANGE_RULES_COMPACT + "\n\n" + "\n\n".join(blocks)
-        user = f"방금 플레이어가 4인 카드게임에서 {player_rank}등을 했다.{hl} 각자 플레이어에게 할 한마디."
+        user = (f"방금 플레이어가 4인 카드게임에서 {player_rank}등을 했다.{hl} 각자 플레이어에게 할 한마디."
+                " 마이룸에서 나눈 이야기가 있으면 그걸 결과와 엮어서.")
     else:
         blocks = []
         for name in chars:
             info = DEFAULT_CHARACTERS[name]
             rel = rel_by_char.get(name, {})
+            mem = memory_context(name, max_notes=2, with_recent=True, max_len=120)
             blocks.append(f"[{name}]\n성격: {info['personality']}\n말투: {info['speech_style']}\n"
-                          f"플레이어와의 관계: 친밀도 {rel.get('intimacy', 0):+d}, 신뢰 {rel.get('trust', 0)}/100")
+                          f"플레이어와의 관계: 친밀도 {rel.get('intimacy', 0):+d}, 신뢰 {rel.get('trust', 0)}/100"
+                          + (f"\n마이룸에서 플레이어와: {mem}" if mem else ""))
         system = EXCHANGE_RULES + "\n\n" + "\n\n".join(blocks)
         user = (f"방금 플레이어가 4명이 하는 카드게임에서 {player_rank}등을 했어.{hl} "
                 f"각 캐릭터가 이 결과를 보고 플레이어에게 할 법한 짧은 한마디를 자기 성격과 말투 그대로 한 문장씩 써.")
@@ -1516,13 +1704,20 @@ def _user_message(req: UserMessageRequest):
             "timestamp": time.time()
         })
         history_snapshot = list(conversation_history)
-    reply = call_ollama(responder, history_snapshot, req.message)
+    # 예전에 나눈 이야기(기억)를 관계 줄에 같이 넣어, 서버를 다시 켜도 이어서 말하게 한다.
+    rel_ctx = compact_relation(get_relationship("플레이어", responder))
+    mem = memory_context(responder, max_notes=2, with_recent=False, max_len=80)
+    if mem:
+        rel_ctx += f" / {mem}"
+    reply = call_ollama(responder, history_snapshot, req.message, relationship_ctx=rel_ctx, from_player=True)
     with _conv_lock:
         conversation_history.append({"speaker": responder, "message": reply, "timestamp": time.time()})
+    convo_text = f"플레이어: {req.message}\n{responder}: {reply}"
+    if not reply.startswith("("):
+        remember_exchange(responder, req.message, reply)
+        submit_background(extract_memory_note, responder, convo_text)
     # 대화 내용에 따라 플레이어-캐릭터 호감도를 소폭 조정(응답 뒤, 플레이어 요청 사이 빈틈에).
-    submit_background(
-        judge_and_adjust_relationship, "플레이어", responder,
-        f"플레이어: {req.message}\n{responder}: {reply}")
+    submit_background(judge_and_adjust_relationship, "플레이어", responder, convo_text)
     return {"speaker": responder, "reply": reply}
 
 class GroupMessageRequest(BaseModel):
@@ -1882,6 +2077,9 @@ def _player_approach(name: str):
         if summary and other:
             event_ctx = f"방금 전 {other[0]}와(과) 있었던 일: {summary}"
 
+    mem = memory_context(name, max_notes=1, with_recent=False, max_len=50)
+    if mem:
+        event_ctx = (event_ctx + " " + mem).strip()
     situation = approach_situation(name, recent_ctx, event_ctx)
 
     with _conv_lock:
@@ -1941,6 +2139,7 @@ class GameResultRequest(BaseModel):
     total_players: int = 4
     pass_count: int = 0                  # 플레이어의 패스 횟수
     highlights: list[str] = []           # 이번 판 명장면(Unity 하이라이트 감지기), 예: ["플레이어 역전", "류 마지막 한 장"]
+    with_reactions: bool = True          # False 면 관계 반영·기록만(반응은 홈에서 /game/return 으로 따로 받음)
 
 @app.post("/game/result")
 def report_game_result(req: GameResultRequest):
@@ -1976,15 +2175,16 @@ def _report_game_result(req: GameResultRequest):
     # 각 캐릭터와의 관계 업데이트
     rel_by_char = {}
     for char_name in chars:
-        update_relationship("플레이어", char_name, base_intimacy, base_trust, "neutral", result_desc)
+        # 감정은 건드리지 않는다 — 마이룸 대화로 쌓인 감정이 게임 한 판에 'neutral' 로 지워지지 않게.
+        update_relationship("플레이어", char_name, base_intimacy, base_trust, None, result_desc)
         rel_by_char[char_name] = get_relationship("플레이어", char_name)
 
     # 빠른 모드: 캐릭터 전원의 반응을 LLM 1회로
     reactions = {}
-    if FAST_MODE:
+    if FAST_MODE and req.with_reactions:
         try:
             msgs, schema = build_reaction_messages(chars, req.player_rank, rel_by_char, req.highlights)
-            raw = ollama_chat(MODEL_NAME, msgs, temperature=0.85,
+            raw = ollama_chat(MODEL_NAME, msgs, temperature=DIALOGUE_TEMP,
                               num_predict=(45 if PROMPT_STYLE == "compact" else 80) * len(chars),
                               fmt=schema, kind="reactions")
             parsed = json.loads(raw)
@@ -1994,7 +2194,7 @@ def _report_game_result(req: GameResultRequest):
             print(f"[game result] 한 번에 생성 실패 → 캐릭터별 생성: {e}")
             reactions = {}
 
-    for char_name in chars:
+    for char_name in (chars if req.with_reactions else []):
         if char_name in reactions:
             continue
         rel = rel_by_char[char_name]
@@ -2055,6 +2255,51 @@ def _report_game_result(req: GameResultRequest):
 
 
 # ========================
+# 카드게임에서 홈(마이룸)으로 돌아왔을 때 — 방금 판에 대한 한마디
+# ========================
+
+class GameReturnRequest(BaseModel):
+    name: str = "세비-호"                # 반응할 캐릭터
+    winner: str = ""
+    player_rank: int = 0                 # 0 = 모름
+    char_rank: int = 0                   # 이 캐릭터의 순위(0 = 모름)
+    highlights: list[str] = []           # 이번 판 명장면
+
+
+def game_return_situation(name: str, req: GameReturnRequest) -> str:
+    parts = []
+    if req.player_rank:
+        parts.append(f"플레이어 {req.player_rank}등")
+    if req.char_rank:
+        parts.append(f"너 {req.char_rank}등")
+    if req.winner and req.winner not in ("플레이어", name):
+        parts.append(f"1등은 {req.winner}")
+    result = ", ".join(parts) or "결과 모름"
+    hl = f" 명장면: {', '.join(req.highlights[:4])}." if req.highlights else ""
+    return (f"(방금 플레이어와 4인 카드게임 세븐을 한 판 끝내고 마이룸으로 돌아왔다. 결과: {result}.{hl} "
+            f"방금 판에 대해 플레이어에게 한마디 해. 명장면이 있으면 하나를 콕 짚어서.)")
+
+
+@app.post("/game/return")
+def game_return(req: GameReturnRequest):
+    with interactive():
+        return _game_return(req)
+
+
+def _game_return(req: GameReturnRequest):
+    name = req.name
+    if name not in DEFAULT_CHARACTERS:
+        return {"error": f"캐릭터 없음: {name}"}
+    with _conv_lock:
+        recent_hist = list(conversation_history[-6:])
+    line = call_ollama(name, recent_hist, user_message=game_return_situation(name, req))
+    # 대화 히스토리에 남겨서 이어지는 대화가 방금 판을 기억하게
+    with _conv_lock:
+        conversation_history.append({"speaker": name, "message": line, "timestamp": time.time()})
+    return {"speaker": name, "line": line}
+
+
+# ========================
 # 카드게임 하이라이트 반응 대사 묶음 (Unity HighlightDirector 가 게임 시작 때 받아 감)
 # ========================
 # (Unity 키, 프롬프트 칸 이름, 상황 설명) — Unity CharacterReactionLines 의 키와 같다
@@ -2063,25 +2308,31 @@ REACTION_SLOTS = [
     ("last_card_player", "플레이어_마지막한장",  "플레이어가 마지막 한 장만 남았을 때"),
     ("comeback_self",    "내가_역전",          "네가 뒤처져 있다가 선두로 역전했을 때"),
     ("comeback_player",  "플레이어_역전",       "플레이어가 너를 제치고 역전했을 때"),
-    ("triple_self",      "내가_3장몰아치기",    "네가 한 번에 3장을 몰아서 내며 끝을 향해 달릴 때"),
-    ("triple_player",    "플레이어_3장몰아치기", "플레이어가 한 번에 3장을 몰아서 냈을 때"),
+    ("blockade_player",  "플레이어에게_봉쇄당함", "플레이어가 네가 낼 카드 바로 앞 카드를 일부러 쥐고 안 내서, 네가 어쩔 수 없이 패스했을 때"),
     ("stuck_self",       "내가_막힘",          "네가 낼 카드가 없어 계속 패스할 때"),
     ("stuck_player",     "플레이어_막힘",       "플레이어가 낼 카드가 없어 계속 패스할 때"),
     ("close_race",       "접전",              "여러 명이 거의 다 끝나 가는 접전일 때"),
+    ("game_start",       "게임시작",           "게임을 막 시작하며 플레이어에게 건네는 첫마디"),
 ]
 REACTION_BANK_TTL = 3 * 3600           # 이보다 오래된 묶음은 새로 만든다
+REACTION_BANK_VERSION = 2              # 상황 칸이 바뀌면 올린다 → 예전 묶음은 새로 만든다(2: 3장 몰아치기 → 봉쇄)
 _bank_lock = threading.Lock()
 _bank_pending: dict = {}               # 캐릭터 → 예약 시각 (10분 넘게 안 끝나면 다시 예약 가능)
 
 
-def build_reaction_bank_messages(name: str, rel: dict) -> tuple:
-    """캐릭터 한 명의 하이라이트 반응 대사 묶음(상황 9개)을 LLM 1회로 받기 위한 (messages, 스키마)."""
+def build_reaction_bank_messages(name: str, rel: dict, memory: str = "") -> tuple:
+    """캐릭터 한 명의 하이라이트 반응 대사 묶음(상황 REACTION_SLOTS 개)을 LLM 1회로 받기 위한 (messages, 스키마).
+    memory(마이룸에서 나눈 이야기)가 있으면 몇몇 대사가 그걸 짚게 한다."""
     system = (f"{COMPACT_RULES}\n\n{character_card(name)}\n\n"
               f"너는 '{name}'다. 지금 플레이어와 4인 카드게임(세븐)을 하는 중이다.\n"
               f"플레이어와: {compact_relation(rel)}")
+    if memory:
+        system += f"\n마이룸에서 플레이어와 나눈 이야기: {memory}"
+    mem_rule = ("\n게임시작 칸과 두세 칸은 마이룸에서 나눈 이야기를 자연스럽게 짚어서 쓴다(나머지는 상황에만 집중)."
+                if memory else "")
     user = ("아래 상황마다 네가 플레이어 들으라고 툭 던지는 한마디를 칸에 하나씩 써.\n"
             + "\n".join(f"{ko}: {desc}" for _, ko, desc in REACTION_SLOTS)
-            + "\n(존댓말 한 문장씩, 상황마다 다르게. 예시 대사를 그대로 쓰지 않는다)")
+            + "\n(존댓말 한 문장씩, 상황마다 다르게. 예시 대사를 그대로 쓰지 않는다)" + mem_rule)
     props = {ko: {"type": "string"} for _, ko, _ in REACTION_SLOTS}
     schema = {"type": "object", "properties": props, "required": list(props)}
     return [{"role": "system", "content": system}, {"role": "user", "content": user}], schema
@@ -2104,14 +2355,17 @@ def parse_reaction_bank(raw: str) -> dict:
 def refresh_reaction_bank(name: str):
     """(백그라운드) 캐릭터 한 명의 반응 대사 묶음을 새로 만들어 저장."""
     try:
-        msgs, schema = build_reaction_bank_messages(name, get_relationship("플레이어", name))
-        raw = ollama_chat(MODEL_NAME, msgs, temperature=0.9, num_predict=60 * len(REACTION_SLOTS),
+        mem_ts = get_player_memory(name)["notes_ts"]
+        msgs, schema = build_reaction_bank_messages(name, get_relationship("플레이어", name),
+                                                    memory_context(name, max_notes=3, with_recent=True))
+        raw = ollama_chat(MODEL_NAME, msgs, temperature=min(DIALOGUE_TEMP + 0.1, 1.0), num_predict=60 * len(REACTION_SLOTS),
                           fmt=schema, kind="reaction_bank")
         lines = parse_reaction_bank(raw)
         if len(lines) >= len(REACTION_SLOTS) // 2:
             with _rel_lock:
                 data = _load_data()
-                data.setdefault("reaction_bank", {})[name] = {"lines": lines, "ts": time.time()}
+                data.setdefault("reaction_bank", {})[name] = {"lines": lines, "ts": time.time(), "mem_ts": mem_ts,
+                                                              "v": REACTION_BANK_VERSION}
                 _save_data(data)
         else:
             print(f"[reaction_bank] {name}: 쓸 만한 대사가 부족해서 버림 ({len(lines)}개)")
@@ -2123,10 +2377,11 @@ def refresh_reaction_bank(name: str):
         _bank_pending.pop(name, None)
 
 
-def schedule_reaction_bank(name: str) -> bool:
-    """반응 대사 묶음 생성을 백그라운드에 예약(이미 예약돼 있으면 무시). 새로 예약했으면 True."""
+def schedule_reaction_bank(name: str, force: bool = False) -> bool:
+    """반응 대사 묶음 생성을 백그라운드에 예약(이미 예약돼 있으면 무시). 새로 예약했으면 True.
+    force=True(새 기억이 생김)면 이미 예약돼 있어도 한 번 더 만든다 — 먼저 돈 작업은 옛 기억으로 만들었을 수 있다."""
     with _bank_lock:
-        if name in _bank_pending and time.time() - _bank_pending[name] < 600:
+        if not force and name in _bank_pending and time.time() - _bank_pending[name] < 600:
             return False
         _bank_pending[name] = time.time()
     submit_background(refresh_reaction_bank, name)
@@ -2145,12 +2400,98 @@ def get_reaction_bank():
         entry = bank.get(name)
         if entry:
             lines += [{"character": name, "key": k, "line": v} for k, v in entry.get("lines", {}).items()]
-        if not entry or now - entry.get("ts", 0) > REACTION_BANK_TTL:
+        stale_memory = entry and entry.get("mem_ts", 0) < get_player_memory(name)["notes_ts"]
+        old_slots = entry and entry.get("v", 1) != REACTION_BANK_VERSION
+        if not entry or now - entry.get("ts", 0) > REACTION_BANK_TTL or stale_memory or old_slots:
             schedule_reaction_bank(name)
         with _bank_lock:
             if name in _bank_pending:
                 pending.append(name)
     return {"lines": lines, "pending": pending}
+
+
+@app.get("/game/pregame")
+def game_pregame(name: str = "세비-호"):
+    """게임 시작 첫마디(마이룸에서 나눈 이야기를 짚어서). 홈에서 '게임' 버튼을 누를 때 미리 받아 둔다."""
+    with interactive():
+        return _game_pregame(name)
+
+
+def _game_pregame(name: str):
+    if name not in DEFAULT_CHARACTERS:
+        return {"error": f"캐릭터 없음: {name}"}
+    mem = memory_context(name, max_notes=3, with_recent=True)
+    system = (f"{COMPACT_RULES}\n\n{character_card(name)}\n\n너는 '{name}'다. 지금 상대: 플레이어\n"
+              f"플레이어와: {compact_relation(get_relationship('플레이어', name))}")
+    if mem:
+        system += f"\n마이룸에서 플레이어와 나눈 이야기: {mem}"
+        user = "(이제 플레이어와 4인 카드게임 세븐을 시작한다. 마이룸에서 나눈 이야기를 짚으면서 시작 첫마디를 해. 존댓말 한 문장으로)"
+    else:
+        user = "(이제 플레이어와 4인 카드게임 세븐을 시작한다. 시작 첫마디를 해. 존댓말 한 문장으로)"
+    try:
+        line = clean_line(ollama_chat(MODEL_NAME, [{"role": "system", "content": system},
+                                                   {"role": "user", "content": user}],
+                                      temperature=DIALOGUE_TEMP, num_predict=64, kind="pregame"))
+    except Exception as e:
+        return {"speaker": name, "line": "", "used_memory": bool(mem), "error": str(e)}
+    return {"speaker": name, "line": line, "used_memory": bool(mem)}
+
+
+@app.get("/character/poke")
+def character_poke(name: str = "세비-호", count: int = 1):
+    """홈에서 캐릭터를 톡 건드렸을 때의 반응 한마디. 클라이언트는 가끔만 부르고,
+    기다리는 동안 기본 대사를 먼저 띄운 뒤 이 대사를 이어서 보여 준다(로딩 티 안 나게)."""
+    with interactive():
+        return _character_poke(name, count)
+
+
+def _character_poke(name: str, count: int):
+    if name not in DEFAULT_CHARACTERS:
+        return {"error": f"캐릭터 없음: {name}"}
+    mem = memory_context(name, max_notes=1, with_recent=False, max_len=60)
+    system = (f"{COMPACT_RULES}\n\n{character_card(name)}\n\n너는 '{name}'다. 지금 상대: 플레이어\n"
+              f"플레이어와: {compact_relation(get_relationship('플레이어', name))}")
+    if mem:
+        system += f"\n마이룸에서 플레이어와 나눈 이야기: {mem}"
+    if count >= 4:
+        poke = f"플레이어가 아무 말 없이 너를 계속 톡톡 건드린다(벌써 {count}번째)"
+    elif count >= 2:
+        poke = "플레이어가 아무 말 없이 너를 또 톡 건드렸다"
+    else:
+        poke = "플레이어가 아무 말 없이 너를 손가락으로 톡 건드렸다"
+    user = f"({poke}. 지금 관계와 네 성격대로 짧게 반응해. 존댓말 한 문장으로)"
+    try:
+        line = clean_line(ollama_chat(MODEL_NAME, [{"role": "system", "content": system},
+                                                   {"role": "user", "content": user}],
+                                      temperature=DIALOGUE_TEMP, num_predict=64, kind="poke"))
+    except Exception as e:
+        return {"speaker": name, "line": "", "error": str(e)}
+    return {"speaker": name, "line": line}
+
+
+@app.get("/memory/{name}")
+def get_memory(name: str):
+    """캐릭터가 기억하는 플레이어 이야기(홈 화면 '기억' 패널·발표 시연용)."""
+    if name not in DEFAULT_CHARACTERS:
+        return {"error": f"캐릭터 없음: {name}"}
+    mem = get_player_memory(name)
+    return {"name": name,
+            "notes": [n["text"] for n in mem["notes"]],
+            "recent": [{"player": h["player"], "reply": h["reply"]} for h in mem["log"][-5:]]}
+
+
+@app.post("/memory/clear")
+def clear_memory(name: Optional[str] = None):
+    """기억 지우기(name 없으면 전원). 시연 전 초기화용."""
+    with _rel_lock:
+        data = _load_data()
+        pm = data.setdefault("player_memory", {})
+        for n in ([name] if name else list(pm)):
+            pm.pop(n, None)
+        _save_data(data)
+    for n in ([name] if name in DEFAULT_CHARACTERS else list(DEFAULT_CHARACTERS)):
+        schedule_reaction_bank(n, force=True)
+    return {"cleared": name or "all"}
 
 
 # ========================
