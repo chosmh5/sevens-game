@@ -9,6 +9,7 @@ import queue
 import json
 import os
 import random
+import shutil
 
 
 @asynccontextmanager
@@ -16,6 +17,8 @@ async def _lifespan(app):
     # 서버가 뜰 때 백그라운드 작업자(관계 판정·혼잣말 미리 만들기)를 시작한다.
     # import 시점이 아니라 여기서 시작하므로 bench_models.py 가 main 을 import 해도 스레드가 안 뜬다.
     _start_background_worker()
+    if os.getenv("SEVENS_SEED_MEMORY", "1") == "1":
+        seed_player_memory(only_if_empty=True)   # 기억이 비어 있으면 발표용 기본 기억(seed_memory.json)
     yield
 
 
@@ -131,7 +134,10 @@ DEFAULT_CHARACTERS = {
             "도박과 승부를 즐기며, 지는 걸 극도로 싫어한다. "
             "감정을 직접 드러내지 않지만 말 한마디에 성격이 묻어난다. "
             "플레이어를 은근히 신경 쓰지만 절대 먼저 티 내지 않는다. "
-            "잘난 척하면서도 가끔 엉뚱한 데서 허를 찌르는 발언을 한다."
+            "칭찬받거나 정곡을 찔리면 말을 끊고 딴소리로 넘어간다. "
+            "걱정은 핀잔으로, 칭찬은 비꼬듯 돌려서 한다. "
+            "잘난 척하면서도 가끔 엉뚱한 데서 허를 찌르는 발언을 한다. "
+            "좋아하는 것: 이기는 것, 단 것, 몰래 인정받는 것. 싫어하는 것: 지는 것, 동정받는 것."
         ),
         "speech_style": (
             "한국어 구어체 존댓말로 짧고 직설적으로 말한다. "
@@ -211,11 +217,18 @@ COMPACT_RULES = """너는 섬에 사는 캐릭터다. AI 비서가 아니다.
 #   작은 모델이 말투만 흉내 내고 엉뚱한 말을 붙이는 대신, 상대 말에 맞춰 대답하는 법을 따라 한다.
 CHARACTER_CARDS = {
     "세비-호": {
-        "core": "자신만만한 승부사. 지는 걸 죽기보다 싫어하고, 걱정도 허세로 감춘다.",
-        "voice": "짧고 단정하게. 남 칭찬은 비꼬듯이. 자기 자랑은 말이 이어질 때만 슬쩍.",
+        "core": "자신만만한 승부사. 1등은 당연히 제 자리라고 믿고, 지는 건 죽기보다 싫어한다. "
+                "속으로는 플레이어를 꽤 좋아하지만, 그걸 들키는 건 지는 것보다 더 싫어한다.",
+        "voice": "짧고 단정한 존댓말. 칭찬은 비꼬듯 돌려서, 걱정은 핀잔으로 감춰서 한다. "
+                 "정곡을 찔리거나 칭찬받으면 '…'로 말을 끊고 딴소리를 한다. 기분 나쁘면 '흥'. "
+                 "자기 자랑은 대화가 이어질 때만 슬쩍.",
+        "taste": "좋아함: 이기는 것, 단 것, 몰래 인정받는 것 / 싫어함: 지는 것, 동정받는 것, 무시당하는 것",
         "others": "류는 얄미운 라이벌, 진은 속을 모를 사람. 플레이어는 은근히 신경 쓰이지만 티 안 낸다.",
         "examples": [("플레이어", "어제 게임 아깝게 졌죠?", "아깝긴요, 일부러 봐준 거예요."),
-                     ("플레이어", "오늘 기분 좋아 보여요.", "그렇게 보여요? 뭐, 틀린 말은 아니네요."),
+                     ("플레이어", "세비-호가 최고예요.", "…새삼스럽게요. 그건 원래 알고 있었어요."),
+                     ("플레이어", "오늘 좀 피곤해요.", "그럼 일찍 쉬어요. 걱정돼서가 아니라, 지친 사람 이겨 봤자 재미없으니까요."),
+                     ("플레이어", "이번엔 제가 이길 거예요.", "그 말, 게임 끝나고도 할 수 있으면 좋겠네요."),
+                     ("플레이어", "저 졌어요…", "흥, 그러니까 제 말을 들었어야죠. …다음엔 조금 봐줄게요."),
                      ("류", "또 허세네요.", "허세 아니에요. 그냥 사실이죠.")],
     },
     "류": {
@@ -245,7 +258,8 @@ def character_card(name: str) -> str:
         return f"[{name}]\n{info.get('personality', '')[:120]}\n{info.get('speech_style', '')[:120]}"
     ex = "\n".join(f"- {who}: {said} → {name}: {reply}" if not isinstance(e, str) else f"- {e}"
                     for e in c["examples"] for who, said, reply in [e if not isinstance(e, str) else ("", "", "")])
-    return (f"[{name}]\n정체: {c['core']}\n말버릇: {c['voice']}\n"
+    taste = f"취향: {c['taste']}\n" if c.get("taste") else ""
+    return (f"[{name}]\n정체: {c['core']}\n말버릇: {c['voice']}\n{taste}"
             f"주변: {c['others']}\n대화 예:\n{ex}")
 
 
@@ -273,21 +287,49 @@ def _rel_key(a: str, b: str) -> str:
     """항상 알파벳 순으로 정렬해 동일한 키 보장"""
     return f"{min(a,b)}|{max(a,b)}"
 
+def _read_json(path: str):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f) or {}
+
+
 def _load_data() -> dict:
+    """data.json 읽기. 파일이 깨져 있으면 그대로 덮어쓰지 않도록 따로 보관하고 백업(.bak)에서 복구한다.
+    (예전에는 깨진 파일을 빈 데이터로 읽은 뒤 다음 저장 때 덮어써서 관계·기억이 전부 날아갔다.)"""
     data = {}
     if os.path.exists(DATA_PATH):
         try:
-            with open(DATA_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f) or {}
-        except Exception:
-            data = {}
+            data = _read_json(DATA_PATH)
+        except Exception as e:
+            broken = f"{DATA_PATH}.broken-{int(time.time())}"
+            try:
+                os.replace(DATA_PATH, broken)
+                print(f"[data] data.json 을 읽지 못해 {os.path.basename(broken)} 로 옮겨 둠: {e}")
+            except OSError:
+                pass
+            try:
+                data = _read_json(DATA_PATH + ".bak")
+                print("[data] data.json.bak 에서 복구함")
+            except Exception:
+                data = {}
+    if not isinstance(data, dict):
+        data = {}
     data.setdefault("relationships", {})
     data.setdefault("events", [])
     return data
 
 def _save_data(data: dict):
-    with open(DATA_PATH, "w", encoding="utf-8") as f:
+    """임시 파일에 다 쓴 뒤 한 번에 바꿔치기(os.replace) → 저장 도중 서버가 꺼져도 파일이 반쯤 쓰인 채로 남지 않는다.
+    저장한 내용은 data.json.bak 에도 복사해 두어, 밖에서 data.json 이 망가져도 복구할 수 있게 한다."""
+    tmp = DATA_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, DATA_PATH)
+    try:
+        shutil.copyfile(DATA_PATH, DATA_PATH + ".bak")
+    except OSError:
+        pass
 
 def get_relationship(a: str, b: str) -> dict:
     with _rel_lock:
@@ -409,6 +451,44 @@ def memory_context(name: str, max_notes: int = 3, with_recent: bool = True, max_
             when = "방금" if age < 1800 else "아까"
             parts.append(f"{when} 대화 — 플레이어: \"{last['player'][:50]}\" 나: \"{last['reply'][:40]}\"")
     return " / ".join(parts)[:max_len]
+
+
+SEED_MEMORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seed_memory.json")
+
+
+def seed_player_memory(name: Optional[str] = None, only_if_empty: bool = False) -> list:
+    """seed_memory.json 의 기본 기억(발표·시연용)으로 덮어쓴다. 넣은 캐릭터 이름 목록을 돌려준다.
+    only_if_empty=True 면 기억이 하나도 없는 캐릭터에만 넣는다(서버 시작 때).
+    notes_ts 가 바뀌므로 카드게임 반응 대사 묶음도 새 기억으로 다시 만들어진다."""
+    try:
+        with open(SEED_MEMORY_PATH, "r", encoding="utf-8") as f:
+            seed = json.load(f)
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        print(f"[memory] seed_memory.json 읽기 실패: {e}")
+        return []
+    now = time.time()
+    done = []
+    with _rel_lock:
+        data = _load_data()
+        for n, s in seed.items():
+            if n.startswith("_") or n not in DEFAULT_CHARACTERS or (name and n != name):
+                continue
+            mem = _mem_entry(data, n)
+            if only_if_empty and (mem["notes"] or mem["log"]):
+                continue
+            log = [l for l in s.get("log", []) if l.get("player")][-MEMORY_LOG_MAX:]
+            mem["notes"] = [{"text": t, "ts": now} for t in s.get("notes", []) if t][-MEMORY_NOTES_MAX:]
+            mem["log"] = [{"player": l["player"], "reply": l.get("reply", ""), "ts": now - 60 * (len(log) - i)}
+                          for i, l in enumerate(log)]
+            mem["updated"] = mem["notes_ts"] = now
+            done.append(n)
+        if done:
+            _save_data(data)
+    if done:
+        print(f"[memory] 기본 기억 넣음: {', '.join(done)}")
+    return done
 
 
 MEMORY_SCHEMA = {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}
@@ -610,7 +690,10 @@ def ollama_chat(model: str, messages: list, *, temperature: float, num_predict: 
     t0 = time.time()
     if not background:
         res = requests.post(OLLAMA_CHAT_URL, json=payload, timeout=240)
-        data = res.json()
+        try:
+            data = res.json()
+        except ValueError:
+            raise RuntimeError(f"Ollama 응답 해석 실패 (HTTP {res.status_code}): {res.text[:120]}")
         if "error" in data:
             raise RuntimeError(data["error"])
         content = data.get("message", {}).get("content", "")
@@ -1712,6 +1795,7 @@ def _user_message(req: UserMessageRequest):
     reply = call_ollama(responder, history_snapshot, req.message, relationship_ctx=rel_ctx, from_player=True)
     with _conv_lock:
         conversation_history.append({"speaker": responder, "message": reply, "timestamp": time.time()})
+        del conversation_history[:-100]   # 오래 켜 둬도 메모리가 계속 늘지 않게
     convo_text = f"플레이어: {req.message}\n{responder}: {reply}"
     if not reply.startswith("("):
         remember_exchange(responder, req.message, reply)
@@ -1928,6 +2012,7 @@ def _conversation_exchange(req: ExchangeRequest):
             with _conv_lock:
                 conversation_history.append(
                     {"speaker": asker, "message": player_question, "timestamp": time.time()})
+                del conversation_history[:-100]
 
     # 두 캐릭터의 호감도를 이 대화 내용에 따라 조정(응답 뒤 백그라운드).
     convo_text = "\n".join(f"{l['speaker']}: {l['line']}" for l in lines)
@@ -2093,6 +2178,7 @@ def _player_approach(name: str):
             "message": line,
             "timestamp": time.time()
         })
+        del conversation_history[:-100]
 
     return {"speaker": name, "line": line}
 
@@ -2296,6 +2382,7 @@ def _game_return(req: GameReturnRequest):
     # 대화 히스토리에 남겨서 이어지는 대화가 방금 판을 기억하게
     with _conv_lock:
         conversation_history.append({"speaker": name, "message": line, "timestamp": time.time()})
+        del conversation_history[:-100]
     return {"speaker": name, "line": line}
 
 
@@ -2308,14 +2395,14 @@ REACTION_SLOTS = [
     ("last_card_player", "플레이어_마지막한장",  "플레이어가 마지막 한 장만 남았을 때"),
     ("comeback_self",    "내가_역전",          "네가 뒤처져 있다가 선두로 역전했을 때"),
     ("comeback_player",  "플레이어_역전",       "플레이어가 너를 제치고 역전했을 때"),
-    ("blockade_player",  "플레이어에게_봉쇄당함", "플레이어가 네가 낼 카드 바로 앞 카드를 일부러 쥐고 안 내서, 네가 어쩔 수 없이 패스했을 때"),
+    ("blockade_player",  "플레이어에게_봉쇄당함", "플레이어에게 길이 막혀 네가 어쩔 수 없이 패스했을 때(어떤 카드로 어떻게 막혔는지는 말하지 않는다)"),
     ("stuck_self",       "내가_막힘",          "네가 낼 카드가 없어 계속 패스할 때"),
     ("stuck_player",     "플레이어_막힘",       "플레이어가 낼 카드가 없어 계속 패스할 때"),
     ("close_race",       "접전",              "여러 명이 거의 다 끝나 가는 접전일 때"),
     ("game_start",       "게임시작",           "게임을 막 시작하며 플레이어에게 건네는 첫마디"),
 ]
 REACTION_BANK_TTL = 3 * 3600           # 이보다 오래된 묶음은 새로 만든다
-REACTION_BANK_VERSION = 2              # 상황 칸이 바뀌면 올린다 → 예전 묶음은 새로 만든다(2: 3장 몰아치기 → 봉쇄)
+REACTION_BANK_VERSION = 4              # 상황 칸이 바뀌면 올린다 → 예전 묶음은 새로 만든다(2: 3장 몰아치기 → 봉쇄, 3: 봉쇄 대사에서 카드 언급 금지, 4: 세비-호 성격 강화)
 _bank_lock = threading.Lock()
 _bank_pending: dict = {}               # 캐릭터 → 예약 시각 (10분 넘게 안 끝나면 다시 예약 가능)
 
@@ -2494,6 +2581,13 @@ def clear_memory(name: Optional[str] = None):
     return {"cleared": name or "all"}
 
 
+@app.post("/memory/seed")
+def seed_memory(name: Optional[str] = None):
+    """기억을 발표용 기본 기억(seed_memory.json)으로 되돌린다(name 없으면 파일에 있는 캐릭터 전원).
+    서버 주소/docs 에서 눌러도 된다."""
+    return {"seeded": seed_player_memory(name)}
+
+
 # ========================
 # 마이룸 대시보드
 # ========================
@@ -2507,22 +2601,32 @@ def myroom_status():
     """
     chars = list(DEFAULT_CHARACTERS.keys())
 
+    # 홈 화면이 몇 초마다 부르는 API 라, data.json 은 한 번만 읽는다(예전엔 관계마다 파일을 다시 읽었다).
+    with _rel_lock:
+        data = _load_data()
+    rels = data.get("relationships", {})
+
+    def _rel(a: str, b: str) -> dict:
+        r = rels.get(_rel_key(a, b)) or {}
+        return {"intimacy": r.get("intimacy", 0), "trust": r.get("trust", 0),
+                "emotion": r.get("emotion", "neutral"), "milestones": r.get("milestones", [])}
+
     # 플레이어 ↔ 각 캐릭터 관계
     player_relations = {}
     for c in chars:
-        rel = get_relationship("플레이어", c)
+        rel = _rel("플레이어", c)
         player_relations[c] = {
             "intimacy": rel["intimacy"],
             "trust": rel["trust"],
             "emotion": rel["emotion"],
-            "milestones": rel.get("milestones", [])[-3:],  # 최근 3개만
+            "milestones": rel["milestones"][-3:],  # 최근 3개만
         }
 
     # 캐릭터 간 관계 (2명일 때는 1쌍)
     char_relations = {}
     for i in range(len(chars)):
         for j in range(i + 1, len(chars)):
-            rel = get_relationship(chars[i], chars[j])
+            rel = _rel(chars[i], chars[j])
             key = f"{chars[i]}|{chars[j]}"
             char_relations[key] = {
                 "intimacy": rel["intimacy"],
@@ -2531,8 +2635,6 @@ def myroom_status():
             }
 
     # 최근 이벤트 (최대 5개, 요약만)
-    with _rel_lock:
-        data = _load_data()
     events = data.get("events", [])[-5:]
     event_summaries = []
     for ev in events:
