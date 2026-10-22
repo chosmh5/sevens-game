@@ -144,6 +144,11 @@ public class HighlightDirector : MonoBehaviour
     {
         if (_detector == null) OnGameStarted();
         var events = _detector.OnTurnEnded(p.Index, played, _mgr.GetHandCounts(), _mgr.GetHand(p.Index));
+        // '막혔다' 배너(연속 패스)는 플레이어가 막혔을 때만 띄운다.
+        // AI가 막혔을 땐 배너 없이 그 캐릭터가 한마디만 한다(기록은 진행 그래프·요약에 그대로 남음).
+        var aiStuck = events.FindAll(e => e.Type == HighlightType.PassStreak && e.Actor != 0);
+        events.RemoveAll(e => e.Type == HighlightType.PassStreak && e.Actor != 0);
+        foreach (var e in aiStuck) React(e);
         if (events.Count == 0) return;
 
         foreach (var e in events) Debug.Log($"[Highlight] {e}");
