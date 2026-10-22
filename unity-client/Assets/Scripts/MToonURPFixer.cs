@@ -11,14 +11,15 @@ using UnityEngine.Rendering;
 ///
 /// ▣ 정책
 ///   - 얼굴 디테일 (Eye/Brow/Eyelash/Eyeline/Mouth): 원본 유지
-///   - 원래 Cutout(BlendMode 1) 이던 머티리얼(헤어·옷 등): Cutout 유지(원래 _Cutoff), 아웃라인만 끔
+///   - 원래 Cutout(BlendMode 1) 이던 머티리얼(헤어·옷 등): Cutout 유지(원래 _Cutoff) + 얇은 외곽선
 ///       → 알파로 잘려야 할 부분(헤어 안쪽 색, 옷단)이 Opaque 로 칠해져 비쳐 보이던 문제 방지
 ///   - 그 외 MToon 머티리얼:
 ///       · BlendMode = 0 (Opaque), ZWrite = 1, blend = One/Zero
 ///       · _ALPHATEST_ON / _ALPHABLEND_ON / _ALPHAPREMULTIPLY_ON 키워드 제거
 ///       · _Cutoff = 0, _AlphaToMask = 0
 ///       · _Color.a = 1
-///       · Outline 비활성화 (MTOON_OUTLINE_* 키워드 + _OutlineWidth=0)
+///       · 얇은 외곽선 (Screen 모드, 표면색을 어둡게 섞음) — 포즈 실루엣 가독성용
+///   - Transparent 로 바뀌는 머티리얼(Tops 등)은 외곽선 끔
 ///       · RenderQueue = Geometry
 /// </summary>
 public static class MToonURPFixer
@@ -26,6 +27,16 @@ public static class MToonURPFixer
     private const string MToonShaderName = "VRM/MToon";
 
     public static bool Verbose = true;
+
+    // ── 외곽선 설정 ─────────────────────────────────────────────
+    // Screen 모드: 카메라 거리와 상관없이 화면상 두께가 거의 일정.
+    // 0.2 ≈ 세로 1080px 기준 약 1px. 더 얇게 0.15 / 조금 두껍게 0.3
+    public static bool  OutlineEnabled   = true;
+    public static float OutlineWidth     = 0.2f;
+    // 이 거리(m)까지는 두께 유지, 더 멀어지면 가늘어짐 (MToon 범위 1~10)
+    public static float OutlineMaxDist   = 10f;
+    // Mixed 모드: 외곽선 = 이 색 × 표면색 → 머리는 짙은 갈색, 피부는 짙은 살색처럼 자연스럽게
+    public static Color OutlineColor     = new Color(0.22f, 0.18f, 0.22f, 1f);
 
     private static readonly string[] KeepTransparentKeywords =
     {
@@ -83,11 +94,11 @@ public static class MToonURPFixer
                     ForceCutoff(inst, cutoff > 0.01f ? cutoff : 0.5f);
                 }
                 else ForceOpaque(inst);
-                DisableOutline(inst);
+                if (OutlineEnabled) EnableThinOutline(inst); else DisableOutline(inst);
                 newMats[i] = inst;
                 anyChanged = true;
                 converted++;
-                if (Verbose) report.AppendLine($"  · [{(cutout ? "Cutout" : "Opaque")}+NoOutline] {renderer.name}/{mat.name} BM={blendMode}→{(cutout ? 1 : 0)}");
+                if (Verbose) report.AppendLine($"  · [{(cutout ? "Cutout" : "Opaque")}{(OutlineEnabled ? "+Outline" : "+NoOutline")}] {renderer.name}/{mat.name} BM={blendMode}→{(cutout ? 1 : 0)}");
             }
 
             if (anyChanged) renderer.materials = newMats;
@@ -243,6 +254,28 @@ public static class MToonURPFixer
 
         m.renderQueue = (int)RenderQueue.Transparent; // 3000
         m.SetOverrideTag("RenderType", "Transparent");
+
+        // 반투명 위 외곽선은 뒤가 비쳐 지저분해지므로 끔
+        DisableOutline(m);
+    }
+
+    /// <summary>
+    /// MToon 내장 외곽선(FORWARD_BASE_ONLY_OUTLINE 패스)을 얇게 켠다. 셰이더는 그대로.
+    /// </summary>
+    private static void EnableThinOutline(Material m)
+    {
+        if (m.HasProperty("_OutlineWidthMode"))         m.SetFloat("_OutlineWidthMode", 2f);   // 2 = Screen
+        if (m.HasProperty("_OutlineWidth"))             m.SetFloat("_OutlineWidth", OutlineWidth);
+        if (m.HasProperty("_OutlineScaledMaxDistance")) m.SetFloat("_OutlineScaledMaxDistance", OutlineMaxDist);
+        if (m.HasProperty("_OutlineColorMode"))         m.SetFloat("_OutlineColorMode", 1f);   // 1 = Mixed
+        if (m.HasProperty("_OutlineColor"))             m.SetColor("_OutlineColor", OutlineColor);
+        if (m.HasProperty("_OutlineLightingMix"))       m.SetFloat("_OutlineLightingMix", 1f);
+        if (m.HasProperty("_OutlineCullMode"))          m.SetFloat("_OutlineCullMode", 1f);    // Front (뒤집힌 헐)
+
+        m.DisableKeyword("MTOON_OUTLINE_WIDTH_WORLD");
+        m.EnableKeyword("MTOON_OUTLINE_WIDTH_SCREEN");
+        m.DisableKeyword("MTOON_OUTLINE_COLOR_FIXED");
+        m.EnableKeyword("MTOON_OUTLINE_COLOR_MIXED");
     }
 
     private static void DisableOutline(Material m)
