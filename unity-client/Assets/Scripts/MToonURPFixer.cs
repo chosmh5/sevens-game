@@ -11,6 +11,8 @@ using UnityEngine.Rendering;
 ///
 /// ▣ 정책
 ///   - 얼굴 디테일 (Eye/Brow/Eyelash/Eyeline/Mouth): 원본 유지
+///   - 원래 Cutout(BlendMode 1) 이던 머티리얼(헤어·옷 등): Cutout 유지(원래 _Cutoff), 아웃라인만 끔
+///       → 알파로 잘려야 할 부분(헤어 안쪽 색, 옷단)이 Opaque 로 칠해져 비쳐 보이던 문제 방지
 ///   - 그 외 MToon 머티리얼:
 ///       · BlendMode = 0 (Opaque), ZWrite = 1, blend = One/Zero
 ///       · _ALPHATEST_ON / _ALPHABLEND_ON / _ALPHAPREMULTIPLY_ON 키워드 제거
@@ -73,13 +75,19 @@ public static class MToonURPFixer
                 }
 
                 // 머티리얼 인스턴스 생성(원본 에셋 보호) + MToon 셰이더 유지 + 속성만 변경
-                var inst = new Material(mat) { name = mat.name + " (Opaque)" };
-                ForceOpaque(inst);
+                bool cutout = blendMode == 1;
+                var inst = new Material(mat) { name = mat.name + (cutout ? " (Cutout)" : " (Opaque)") };
+                if (cutout)
+                {
+                    float cutoff = mat.HasProperty("_Cutoff") ? mat.GetFloat("_Cutoff") : 0.5f;
+                    ForceCutoff(inst, cutoff > 0.01f ? cutoff : 0.5f);
+                }
+                else ForceOpaque(inst);
                 DisableOutline(inst);
                 newMats[i] = inst;
                 anyChanged = true;
                 converted++;
-                if (Verbose) report.AppendLine($"  · [Opaque+NoOutline] {renderer.name}/{mat.name} BM={blendMode}→0");
+                if (Verbose) report.AppendLine($"  · [{(cutout ? "Cutout" : "Opaque")}+NoOutline] {renderer.name}/{mat.name} BM={blendMode}→{(cutout ? 1 : 0)}");
             }
 
             if (anyChanged) renderer.materials = newMats;

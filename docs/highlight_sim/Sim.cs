@@ -15,7 +15,7 @@ public static class Sim
         var totals = new Dictionary<HighlightType, int>();
         foreach (HighlightType t in Enum.GetValues(typeof(HighlightType))) totals[t] = 0;
         int totalTurns = 0, bigMoments = 0, maxPerTurn = 0;
-        int playerComebacks = 0, gamesWithAnyReaction = 0;
+        int playerComebacks = 0, gamesWithAnyReaction = 0, badHistory = 0;
         string sampleLog = null;
 
         for (int g = 0; g < games; g++)
@@ -49,9 +49,17 @@ public static class Sim
                     if (hands[cur].Count == 0) break;
                 }
                 turns++;
-                if (hands[cur].Count == 0) { log.Add($"턴 {turns}: 좌석 {cur} 승리"); break; }
+                if (hands[cur].Count == 0)
+                {
+                    log.Add($"턴 {turns}: 좌석 {cur} 승리");
+                    det.RecordFinal(hands.Select(h => h.Count).ToArray());
+                    det.RecordFinal(hands.Select(h => h.Count).ToArray());   // 두 번 불려도 한 번만
+                    var hist = det.CountHistory;
+                    if (hist.Count != turns + 1 || hist[0].Any(v => v != 12) || hist[turns][cur] != 0) badHistory++;
+                    break;
+                }
                 var counts = hands.Select(h => h.Count).ToArray();
-                var ev = det.OnTurnEnded(cur, played, counts);
+                var ev = det.OnTurnEnded(cur, played, counts, hands[cur]);
                 if (ev.Count > maxPerTurn) maxPerTurn = ev.Count;
                 foreach (var e in ev)
                 {
@@ -80,8 +88,9 @@ public static class Sim
         Check(totals[HighlightType.LastCard] / (double)games > 0.5, "마지막 한 장은 거의 매 판 나온다");
         Check(perGameBig >= 0.8 && perGameBig <= 4.0, $"큰 순간이 판당 0.8~4회 (너무 잦지도 드물지도 않음): {perGameBig:F2}");
         Check(totals[HighlightType.Comeback] / (double)games <= 1.5, "역전은 판당 1.5회 이하");
-        double reactPerGame = totals.Where(kv => kv.Key != HighlightType.Reach && kv.Key != HighlightType.LineComplete && kv.Key != HighlightType.PassStreak).Sum(kv => kv.Value) / (double)games;
+        double reactPerGame = totals.Where(kv => kv.Key != HighlightType.Reach && kv.Key != HighlightType.LineComplete && kv.Key != HighlightType.PassStreak && kv.Key != HighlightType.Comeback).Sum(kv => kv.Value) / (double)games;
         Check(reactPerGame >= 2 && reactPerGame <= 6, $"캐릭터 반응(강도 2 이상)이 판당 2~6회: {reactPerGame:F2} (평균 22턴 기준)");
+        Check(badHistory == 0, $"그래프용 손패 기록: 시작 + 턴마다 1개 + 마지막(승자 0장) (어긋난 판 {badHistory})");
         Check(100.0 * gamesWithAnyReaction / games >= 90, "90% 이상의 판에서 캐릭터 반응이 최소 1번");
 
         // 손으로 만든 시나리오: 역전
@@ -96,14 +105,13 @@ public static class Sim
         d.OnTurnEnded(3, Cards(0), new[] { 9, 9, 11, 11 });
         var e2 = d.OnTurnEnded(0, Cards(2), new[] { 7, 9, 11, 11 }); // 0번 단독 선두
         Check(e2.Any(x => x.Type == HighlightType.Comeback && x.Actor == 0 && x.Other == 1), "3장 뒤처졌던 플레이어가 선두 → 역전(상대=1번)");
-        Check(e2.Any(x => x.Type == HighlightType.Comeback && x.Intensity == 3), "역전은 강도 3");
+        Check(e2.Any(x => x.Type == HighlightType.Comeback && x.Intensity == 1), "역전은 작은 알림(강도 1)");
         Check(d.History.Any(x => x.Type == HighlightType.PassStreak) == false, "1번씩 패스는 '막힘' 아님");
         var e3 = d.OnTurnEnded(1, Cards(0), new[] { 7, 9, 11, 11 });
         Check(e3.Any(x => x.Type == HighlightType.PassStreak && x.Actor == 1 && x.Count == 2), "같은 사람 2연속 패스 → 막힘");
         var e4 = d.OnTurnEnded(2, Cards(3), new[] { 7, 9, 8, 11 });
-        Check(!e4.Any(x => x.Type == HighlightType.TripleCombo), "3장을 냈어도 판세가 그대로면 하이라이트 아님");
-        var e4b = d.OnTurnEnded(3, Cards(3), new[] { 7, 9, 8, 4 });
-        Check(e4b.Any(x => x.Type == HighlightType.TripleCombo && x.Actor == 3), "3장으로 4장 이하가 되면 3장 연속");
+        Check(e4.Count == 0, "3장을 냈어도 판세가 그대로면 하이라이트 아님");
+        d.OnTurnEnded(3, Cards(3), new[] { 7, 9, 8, 4 });
         var e5 = d.OnTurnEnded(0, Cards(3), new[] { 4, 9, 8, 11 });
         e5 = d.OnTurnEnded(0, Cards(1), new[] { 3, 9, 8, 11 });
         Check(e5.Any(x => x.Type == HighlightType.Reach && x.Actor == 0), "처음 3장 이하 → 곧 끝남");
@@ -112,6 +120,35 @@ public static class Sim
         var sum = d.Summary(i => i == 0 ? "플레이어" : new[] { "", "세비-호", "류", "진" }[i]);
         Console.WriteLine("  요약: " + string.Join(", ", sum));
         Check(sum.Count > 0 && sum[0].Contains("플레이어"), "요약에 큰 순간이 먼저 온다");
+
+ 
+        // 손으로 만든 시나리오: 봉쇄(플레이어가 ♥6 을 쥐고 안 내서 ♥5 를 가진 1번이 패스)
+        var b = new SevensHighlightDetector(4, 3);
+        b.Reset(new[] { 12, 12, 12, 12 });
+        var h6 = new Card(Suit.Heart, 6);
+        b.OnTurnEnded(0, new List<Card> { new Card(Suit.Spade, 8) }, new[] { 11, 12, 12, 12 },
+                      new List<Card> { h6, new Card(Suit.Club, 2) });
+        var bx = b.OnTurnEnded(1, new List<Card>(), new[] { 11, 12, 12, 12 },
+                               new List<Card> { new Card(Suit.Club, 13) });
+        Check(!bx.Any(x => x.Type == HighlightType.Blockade), "다음 장(♥5)이 없는 상대의 패스는 봉쇄 아님");
+        var b1 = b.OnTurnEnded(2, new List<Card>(), new[] { 11, 12, 12, 12 },
+                               new List<Card> { new Card(Suit.Heart, 5), new Card(Suit.Club, 13) });
+        Check(b1.Count > 0 && b1[0].Type == HighlightType.Blockade && b1[0].Actor == 0 && b1[0].Other == 2
+              && h6.Equals(b1[0].Blocker), "♥6 을 쥔 플레이어 때문에 ♥5 를 가진 상대가 패스 → 봉쇄(막은 카드 ♥6)");
+        var b2 = b.OnTurnEnded(3, new List<Card>(), new[] { 11, 12, 12, 12 },
+                               new List<Card> { new Card(Suit.Heart, 5) });
+        Check(!b2.Any(x => x.Type == HighlightType.Blockade), "봉쇄 메시지는 한 판에 1번");
+        var bsum = b.Summary(i => i == 0 ? "플레이어" : new[] { "", "세비-호", "류", "진" }[i]);
+        Console.WriteLine("  요약: " + string.Join(", ", bsum));
+        Check(bsum.Any(x => x.Contains("봉쇄") && x.Contains("류")), "요약에 봉쇄(상대 이름)가 들어간다");
+
+        var nb = new SevensHighlightDetector(4, 3);
+        nb.Reset(new[] { 12, 12, 12, 12 });
+        nb.OnTurnEnded(0, new List<Card> { new Card(Suit.Heart, 6) }, new[] { 11, 12, 12, 12 },
+                      new List<Card> { new Card(Suit.Club, 2) });
+        var c1 = nb.OnTurnEnded(1, new List<Card>(), new[] { 11, 12, 12, 12 },
+                               new List<Card> { new Card(Suit.Heart, 4) });
+        Check(!c1.Any(x => x.Type == HighlightType.Blockade), "플레이어가 쥔 카드가 없으면 봉쇄 아님");
 
         Console.WriteLine(failures == 0 ? "\nALL PASSED" : $"\n{failures} FAILED");
         return failures == 0 ? 0 : 1;

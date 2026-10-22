@@ -45,6 +45,16 @@ public class FanLayout : MonoBehaviour
     private void OnValidate() { ApplyLayout(); }
 #endif
 
+    /// <summary>런타임에 부채꼴 모양을 바꾼다(레트로 스킨이 손패 영역에 맞춰 호출).</summary>
+    public void Configure(float newRadius, float newAnglePerCard, float newMaxTotalAngle, float newPivotYOffset)
+    {
+        radius = newRadius;
+        anglePerCard = newAnglePerCard;
+        maxTotalAngle = newMaxTotalAngle;
+        pivotYOffset = newPivotYOffset;
+        ApplyLayout();
+    }
+
     /// <summary>외부에서 강제로 재배치 (카드 추가/제거 후 호출).</summary>
     public void ApplyLayout()
     {

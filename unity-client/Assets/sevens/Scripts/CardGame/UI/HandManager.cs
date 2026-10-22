@@ -32,7 +32,18 @@ public class HandManager : MonoBehaviour
 
     private readonly List<Card>   _hand     = new List<Card>();
     private readonly List<CardUI> _cardUIs  = new List<CardUI>();
-    private CardUI                _selected;
+    private CardUI                _selectedUI;
+    /// <summary>선택 카드. 바뀔 때마다 SelectionChanged 발생.</summary>
+    private CardUI _selected
+    {
+        get => _selectedUI;
+        set
+        {
+            if (_selectedUI == value) return;
+            _selectedUI = value;
+            SelectionChanged?.Invoke();
+        }
+    }
 
     /// <summary>현재 손패 입력 허용 여부. 내 턴이 아닐 땐 false (GameManager가 제어).</summary>
     private bool _interactable = false;
@@ -48,6 +59,9 @@ public class HandManager : MonoBehaviour
 
     /// <summary>손패가 모두 소진됐을 때 발생.</summary>
     public event Action HandEmptied;
+
+    /// <summary>선택 카드가 바뀔 때 발생(필드의 '들어갈 칸' 표시 갱신용).</summary>
+    public event Action SelectionChanged;
 
     // ─────────────────────────────────────────────────────────────
     //  Public API

@@ -92,6 +92,21 @@ public class CardGameManager : MonoBehaviour
     public int PlayerCount => _players != null ? _players.Length : 0;
     public int MaxPlaysPerTurn => maxPlaysPerTurn;
 
+    /// <summary>사람 턴에서 이번 턴에 낸 카드 수(되돌리기 반영).</summary>
+    public int PlaysThisTurn => _playsThisTurn;
+
+    /// <summary>턴 버튼 상태가 다시 계산될 때마다(턴 시작·제출·되돌리기·종료) 발생. HUD 갱신용.</summary>
+    public event Action TurnStateChanged;
+
+    /// <summary>되돌리기 버튼을 런타임에 연결(씬에 버튼이 없을 때 레트로 스킨이 만들어 넘긴다).</summary>
+    public void BindUndoButton(Button button)
+    {
+        if (undoButton != null) undoButton.onClick.RemoveListener(OnUndoClicked);
+        undoButton = button;
+        if (undoButton != null) undoButton.onClick.AddListener(OnUndoClicked);
+        RefreshTurnButton();
+    }
+
     /// <summary>좌석별 남은 손패 수. 0번(사람)은 HandManager 기준.</summary>
     public int[] GetHandCounts()
     {
@@ -100,6 +115,13 @@ public class CardGameManager : MonoBehaviour
         for (int i = 0; i < _players.Length; i++)
             counts[i] = (i == 0 && handManager != null) ? handManager.Hand.Count : _players[i].Hand.Count;
         return counts;
+    }
+
+    /// <summary>좌석의 현재 손패(읽기 전용). 0번(사람)은 HandManager 기준. 하이라이트 '봉쇄' 판단용.</summary>
+    public IReadOnlyList<Card> GetHand(int seat)
+    {
+        if (_players == null || seat < 0 || seat >= _players.Length) return null;
+        return seat == 0 && handManager != null ? handManager.Hand : _players[seat].Hand;
     }
 
     public string GetPlayerName(int seat) =>
@@ -130,7 +152,11 @@ public class CardGameManager : MonoBehaviour
         Debug.Log($"[GameManager] AI 난이도: {diff}");
 
         if (passButton != null) passButton.onClick.AddListener(OnPassClicked);
-        if (undoButton != null) undoButton.onClick.AddListener(OnUndoClicked);
+        if (undoButton != null)
+        {
+            undoButton.onClick.RemoveListener(OnUndoClicked); // BindUndoButton 으로 먼저 연결됐을 수 있음
+            undoButton.onClick.AddListener(OnUndoClicked);
+        }
         if (handManager != null) handManager.CardSubmitted += OnHumanCardPlayed;
 
         if (runOnStart) StartNewGame();
@@ -343,6 +369,13 @@ public class CardGameManager : MonoBehaviour
     ///   - 1장 이상 냄           → "턴 종료" 활성
     /// </summary>
     private void RefreshTurnButton()
+    {
+        RefreshTurnButtonCore();
+        try { TurnStateChanged?.Invoke(); }
+        catch (Exception e) { Debug.LogException(e); }
+    }
+
+    private void RefreshTurnButtonCore()
     {
         // 취소 버튼: 내 턴이고 이번 턴에 낸 카드가 있을 때만 활성.
         if (undoButton != null)

@@ -6,6 +6,12 @@ EditorBuildSettings:
   serializedVersion: 2
   m_Scenes:
   - enabled: 1
+    path: Assets/sevens/Scenes/Home.unity
+    guid: 0e4e1171969314a469577d15ac9b469c
+  - enabled: 1
+    path: Assets/sevens/Scenes/CardGame.unity
+    guid: 95e7a76657f862242aeb5d03bdc5c927
+  - enabled: 1
     path: Assets/sevens/Scenes/TitleScreen.unity
     guid: c4a9b56c4d3034447b6c41d041381b5b
   - enabled: 1
@@ -14,9 +20,6 @@ EditorBuildSettings:
   - enabled: 1
     path: Assets/sevens/Scenes/MyRoom.unity
     guid: f93c1fef8469f8647a3b310f4928fd34
-  - enabled: 1
-    path: Assets/sevens/Scenes/CardGame.unity
-    guid: 95e7a76657f862242aeb5d03bdc5c927
   m_configObjects:
     com.unity.dt.app-ui: {fileID: 11400000, guid: 1b1c20d82303e4b5781c3ef50ac1449f, type: 2}
   m_UseUCBPForAssetBundles: 0

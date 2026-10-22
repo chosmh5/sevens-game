@@ -13,8 +13,9 @@ using UnityEngine;
 public static class PlayFromTitleScreen
 {
     private const string Pref           = "sevens.playFromTitle";
-    private const string MenuPath       = "Tools/Sevens/Play Always Starts at TitleScreen";
-    private const string TitleScenePath = "Assets/sevens/Scenes/TitleScreen.unity";
+    private const string MenuPath       = "Tools/Sevens/Play Always Starts at Home";
+    private const string HomeScenePath  = "Assets/sevens/Scenes/Home.unity";       // 홈(마이룸)이 첫 화면
+    private const string TitleScenePath = "Assets/sevens/Scenes/TitleScreen.unity"; // 홈이 없을 때만
 
     static PlayFromTitleScreen()
     {
@@ -28,15 +29,16 @@ public static class PlayFromTitleScreen
         set => EditorPrefs.SetBool(Pref, value);
     }
 
-    private static void Apply()
+    internal static void Apply()
     {
         if (Enabled)
         {
-            var sceneAsset = AssetDatabase.LoadAssetAtPath<SceneAsset>(TitleScenePath);
+            var sceneAsset = AssetDatabase.LoadAssetAtPath<SceneAsset>(HomeScenePath)
+                          ?? AssetDatabase.LoadAssetAtPath<SceneAsset>(TitleScenePath);
             if (sceneAsset != null)
                 EditorSceneManager.playModeStartScene = sceneAsset;
             else
-                Debug.LogWarning($"[Sevens] TitleScreen 씬을 찾지 못했습니다: {TitleScenePath}");
+                Debug.LogWarning($"[Sevens] 시작 씬을 찾지 못했습니다: {HomeScenePath}");
         }
         else
         {
@@ -49,7 +51,7 @@ public static class PlayFromTitleScreen
     {
         Enabled = !Enabled;
         Apply();
-        Debug.Log($"[Sevens] Play 시작 = TitleScreen : {(Enabled ? "ON" : "OFF")}");
+        Debug.Log($"[Sevens] Play 시작 = Home : {(Enabled ? "ON" : "OFF")}");
     }
 
     [MenuItem(MenuPath, validate = true)]

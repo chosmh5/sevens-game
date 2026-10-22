@@ -8,7 +8,7 @@ using System.Collections.Generic;
 /// - 서버가 없거나 아직 만드는 중이면 아래 기본 대사를 쓴다(캐릭터 카드의 말투에 맞춰 직접 씀).
 ///
 /// 키 = "{상황}_{관점}"
-///   상황: last_card(마지막 한 장) / comeback(역전) / triple(3장 몰아치기) / stuck(막힘) / close_race(접전)
+///   상황: last_card(마지막 한 장) / comeback(역전) / blockade(플레이어가 카드를 쥐고 막음) / stuck(막힘) / close_race(접전)
 ///   관점: self(내가) / player(플레이어가) / rival(다른 캐릭터가)
 /// </summary>
 public static class CharacterReactionLines
@@ -24,13 +24,13 @@ public static class CharacterReactionLines
             ["comeback_self"]    = new[] { "이 정도 차이는 원래 뒤집으라고 있는 거죠.", "역전이요? 계산대로예요." },
             ["comeback_player"]  = new[] { "지금 저를 앞질렀다고요? 우연이에요.", "제법이네요. 아주 조금요." },
             ["comeback_rival"]   = new[] { "흐름이 바뀌었네요. 다시 뺏어 오면 되죠.", "역전이라니, 재밌어지네요." },
-            ["triple_self"]      = new[] { "세 장 한 번에. 이게 실력이죠.", "몰아서 내니까 시원하네요." },
-            ["triple_player"]    = new[] { "세 장이나요? 저도 할 수 있어요.", "제법 몰아치네요." },
-            ["triple_rival"]     = new[] { "그렇게 서두르면 실수해요.", "세 장이요? 별거 아니에요." },
+            ["blockade_player"]  = new[] { "…그 카드, 일부러 쥐고 있는 거죠? 치사해요.", "막았다고 좋아하지 마요. 다음엔 안 당해요." },
             ["stuck_self"]       = new[] { "패스. 일부러 기다리는 거예요.", "지금은 숨 고르는 거예요." },
             ["stuck_player"]     = new[] { "또 패스예요? 제가 너무 잘 막았나 봐요.", "낼 카드가 없나 봐요? 안됐네요." },
             ["stuck_rival"]      = new[] { "막혔네요. 제 덕분이죠.", "패스 행진이네요." },
             ["close_race"]       = new[] { "이제부터 진짜 승부예요.", "다들 거의 다 왔네요. 재밌어지는데요." },
+            ["game_start"]       = new[] { "자, 시작하죠. 1등 자리는 이미 제 거예요.", "오늘도 이기는 건 저예요. 각오해요." },
+            ["game_start_talked"] = new[] { "아까 한 말, 기억하고 있어요. 카드로 증명해 보세요.", "얘기는 충분히 했으니까, 이제 실력으로 보여줘요." },
         },
         ["류"] = new Dictionary<string, string[]>
         {
@@ -40,13 +40,13 @@ public static class CharacterReactionLines
             ["comeback_self"]    = new[] { "흐름이 왔네요.", "예상대로예요." },
             ["comeback_player"]  = new[] { "뒤집었네요.", "잘 버텼어요." },
             ["comeback_rival"]   = new[] { "흐름이 바뀌었네요.", "그럴 줄 알았어요." },
-            ["triple_self"]      = new[] { "정리했어요.", "세 장이요." },
-            ["triple_player"]    = new[] { "과감하네요.", "좋은 판단이에요." },
-            ["triple_rival"]     = new[] { "무리하네요.", "다음은 제 차례죠." },
+            ["blockade_player"]  = new[] { "그 카드, 쥐고 있었군요.", "막혔네요. 잘 아꼈어요." },
             ["stuck_self"]       = new[] { "기다릴게요.", "패스요." },
             ["stuck_player"]     = new[] { "막혔네요.", "때를 기다려요." },
             ["stuck_rival"]      = new[] { "보이는 대로네요.", "막혔네요." },
             ["close_race"]       = new[] { "이제 한 수예요.", "집중할 때예요." },
+            ["game_start"]       = new[] { "시작하죠.", "집중해요." },
+            ["game_start_talked"] = new[] { "아까 얘기, 들었어요.", "말보단 카드죠." },
         },
         ["진"] = new Dictionary<string, string[]>
         {
@@ -56,13 +56,13 @@ public static class CharacterReactionLines
             ["comeback_self"]    = new[] { "바람은 늘 방향을 바꾸죠…", "보세요, 흐름은 돌고 도는 거예요…" },
             ["comeback_player"]  = new[] { "역시… 이렇게 될 줄 알았어요.", "재밌는 반전이네요… 다음엔 뭘 보여줄 건가요?" },
             ["comeback_rival"]   = new[] { "판이 뒤집혔네요… 느껴지죠?", "흐름이 바뀌었어요… 누구 덕분일까요?" },
-            ["triple_self"]      = new[] { "오늘은 카드가 말을 잘 듣네요…", "세 장… 숫자가 맞아떨어졌네요." },
-            ["triple_player"]    = new[] { "오늘은 카드가 당신 편인가 봐요…", "세 장이라… 뭔가 알고 있는 것 같네요?" },
-            ["triple_rival"]     = new[] { "그렇게 서두르면… 놓치는 게 생기죠.", "세 장… 흥미롭네요." },
+            ["blockade_player"]  = new[] { "그 카드… 일부러 아끼고 있었군요.", "길을 막은 게 당신이었네요…" },
             ["stuck_self"]       = new[] { "지금은 기다릴 때예요…", "조용히 지켜볼게요…" },
             ["stuck_player"]     = new[] { "길이 막혔나요… 아니면 기다리는 건가요?", "막힌 길 뒤엔 뭐가 있을까요…" },
             ["stuck_rival"]      = new[] { "길이 막혔네요… 누가 막았을까요?", "기다림도 수예요…" },
             ["close_race"]       = new[] { "이제 누가 웃을까요…", "마지막 장면이 다가오네요…" },
+            ["game_start"]       = new[] { "이번 판은… 어떤 이야기가 될까요.", "카드가 섞였네요… 운명도요." },
+            ["game_start_talked"] = new[] { "아까 나눈 이야기… 카드도 들었을까요?", "말한 대로 될지… 한번 볼까요." },
         },
     };
 
@@ -114,6 +114,17 @@ public static class CharacterReactionLines
         return pick;
     }
 
+    /// <summary>
+    /// 게임 시작 첫마디. 서버 묶음의 game_start 는 마이룸 대화(기억)를 반영해 만든 것이라 있으면 우선,
+    /// 없으면 홈에서 최근에 대화했는지에 따라 기본 대사를 고른다.
+    /// </summary>
+    public static string PickGameStart(string character, bool talkedRecently)
+    {
+        if (_server.TryGetValue(character + "|game_start", out var fromServer) && fromServer.Count > 0)
+            return fromServer[_rng.Next(fromServer.Count)];
+        return Pick(character, talkedRecently ? "game_start_talked" : "game_start");
+    }
+
     /// <summary>하이라이트 종류 → 대사 키의 앞부분. 대사가 없는 종류는 null.</summary>
     public static string KeyOf(HighlightType t)
     {
@@ -121,7 +132,7 @@ public static class CharacterReactionLines
         {
             case HighlightType.LastCard:    return "last_card";
             case HighlightType.Comeback:    return "comeback";
-            case HighlightType.TripleCombo: return "triple";
+            case HighlightType.Blockade:    return "blockade";
             case HighlightType.PassStreak:  return "stuck";
             case HighlightType.CloseRace:   return "close_race";
             default:                        return null;

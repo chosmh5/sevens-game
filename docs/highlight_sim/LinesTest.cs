@@ -11,7 +11,9 @@ public static class LinesTest
         {
             string k = CharacterReactionLines.KeyOf(t);
             if (k == null) continue;
-            string[] persp = t == HighlightType.CloseRace ? new[] { "" } : new[] { "_self", "_player", "_rival" };
+            string[] persp = t == HighlightType.CloseRace ? new[] { "" }
+                           : t == HighlightType.Blockade ? new[] { "_player" }      // 봉쇄는 플레이어가 막은 경우만
+                           : new[] { "_self", "_player", "_rival" };
             foreach (var c in chars) foreach (var p in persp)
             {
                 var line = CharacterReactionLines.Pick(c, k + p);
@@ -26,10 +28,10 @@ public static class LinesTest
         var b = CharacterReactionLines.Pick("류", "comeback_player");
         Check(a != b, $"같은 대사가 연달아 나오지 않음 ({a} / {b})");
         // 서버 대사 우선(70%)
-        CharacterReactionLines.AddServerLine("진", "triple_player", "서버에서 온 대사예요…");
-        int hits = Enumerable.Range(0, 200).Count(_ => CharacterReactionLines.Pick("진", "triple_player") == "서버에서 온 대사예요…");
+        CharacterReactionLines.AddServerLine("진", "blockade_player", "서버에서 온 대사예요…");
+        int hits = Enumerable.Range(0, 200).Count(_ => CharacterReactionLines.Pick("진", "blockade_player") == "서버에서 온 대사예요…");
         Check(hits > 80 && hits < 180, $"서버 대사가 섞여 나옴 (200번 중 {hits}번)");
-        Check(CharacterReactionLines.Pick("모르는캐릭터", "triple_self") == null, "모르는 캐릭터는 null");
+        Check(CharacterReactionLines.Pick("모르는캐릭터", "comeback_self") == null, "모르는 캐릭터는 null");
         Console.WriteLine(fail == 0 ? "ALL PASSED" : $"{fail} FAILED");
         return fail;
     }

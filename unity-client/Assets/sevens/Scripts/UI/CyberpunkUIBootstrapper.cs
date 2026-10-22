@@ -58,6 +58,8 @@ public class CyberpunkUIBootstrapper : MonoBehaviour
 
         // 타이틀 화면에서는 CyberpunkUI 불필요 — 스킵
         if (sceneName == "TitleScreen") return;
+        // 홈(마이룸)은 자체 UI(HomeController)를 쓴다
+        if (sceneName == "Home") return;
 
         GameObject go = new GameObject("[CyberpunkUI]");
         CyberpunkUIBootstrapper boot = go.AddComponent<CyberpunkUIBootstrapper>();

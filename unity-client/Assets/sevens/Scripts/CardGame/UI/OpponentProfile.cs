@@ -22,6 +22,11 @@ public class OpponentProfile : MonoBehaviour
     [SerializeField] private Color activeColor = new Color(0.95f, 0.75f, 0.20f, 0.95f);
 
     private Player _player;
+
+    /// <summary>바인딩·카드 수·턴 강조가 바뀔 때 발생(레트로 명패 갱신용).</summary>
+    public event System.Action Changed;
+    public int  CardCount    { get; private set; }
+    public bool IsTurnActive { get; private set; }
     public Player Player => _player;
 
     /// <summary>이 프로필이 표시할 Player 데이터를 바인딩.</summary>
@@ -37,6 +42,8 @@ public class OpponentProfile : MonoBehaviour
     public void SetCardCount(int count)
     {
         if (cardCountText != null) cardCountText.text = $"{count}장";
+        CardCount = count;
+        Changed?.Invoke();
     }
 
     /// <summary>이 플레이어가 현재 턴인지 시각 표시.</summary>
@@ -44,5 +51,7 @@ public class OpponentProfile : MonoBehaviour
     {
         if (backgroundImage != null)
             backgroundImage.color = active ? activeColor : normalColor;
+        IsTurnActive = active;
+        Changed?.Invoke();
     }
 }

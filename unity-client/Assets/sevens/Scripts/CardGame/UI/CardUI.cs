@@ -40,6 +40,7 @@ public class CardUI : MonoBehaviour, IPointerClickHandler
     public bool IsPlayable  => _isPlayable;
 
     private RectTransform _rt;
+    private RetroCardFace _retro;   // 레트로 스킨일 때 스프라이트 대신 쓰는 앞면
     private Vector2       _basePos;
     private Coroutine     _liftCo;
     private Coroutine     _shakeCo;
@@ -49,6 +50,14 @@ public class CardUI : MonoBehaviour, IPointerClickHandler
         _rt = (RectTransform)transform;
         if (canvasGroup == null) canvasGroup = GetComponent<CanvasGroup>();
         if (canvasGroup == null) canvasGroup = gameObject.AddComponent<CanvasGroup>();
+
+        if (RetroTheme.Enabled)
+        {
+            _rt.sizeDelta = new Vector2(100f, 144f);   // 1560×720 기준 카드 크기
+            liftY = 22f;
+            _retro = RetroCardFace.Create(_rt, true);
+            if (faceImage != null) faceImage.enabled = false;
+        }
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -68,10 +77,17 @@ public class CardUI : MonoBehaviour, IPointerClickHandler
         if (canvasGroup != null) canvasGroup.alpha = 1f;
         if (faceImage   != null)
             faceImage.color = playable ? Color.white : new Color(0.78f, 0.78f, 0.78f, 1f);
+        if (_retro != null) _retro.SetHandState(playable, _isSelected);
     }
 
     private void Refresh()
     {
+        if (_retro != null)
+        {
+            _retro.SetCard(_card);
+            if (faceImage != null) faceImage.enabled = false;
+            return;
+        }
         if (faceImage == null) return;
 
         if (_card == null)
@@ -109,6 +125,7 @@ public class CardUI : MonoBehaviour, IPointerClickHandler
     {
         if (_isSelected == selected) return;
         _isSelected = selected;
+        if (_retro != null) _retro.SetHandState(_isPlayable, selected);
 
         if (_liftCo != null) StopCoroutine(_liftCo);
         _liftCo = StartCoroutine(LiftRoutine(selected));

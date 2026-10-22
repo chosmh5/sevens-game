@@ -14,6 +14,9 @@ public class ServerSettingsUI : MonoBehaviour
 {
     static ServerSettingsUI _instance;
 
+    /// <summary>서버 연결 확인에 성공하면 호출(홈 화면이 인사·관계를 다시 불러온다).</summary>
+    public static event System.Action Connected;
+
     GameObject     _panel;
     TMP_InputField _input;
     TMP_Text       _status;
@@ -71,6 +74,7 @@ public class ServerSettingsUI : MonoBehaviour
         if (req.result == UnityWebRequest.Result.Success)
         {
             _status.text = "<color=#66FF66>✅ 연결 성공</color>";
+            Connected?.Invoke();
             yield return new WaitForSeconds(0.8f);
             if (_panel != null) _panel.SetActive(false);
         }

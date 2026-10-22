@@ -38,12 +38,17 @@ public class HighlightDirector : MonoBehaviour
     private RectTransform _bannerRT;
     private TMP_Text      _bannerText;
     private CanvasGroup   _bannerGroup;
+    private Image         _bannerBand;   // 레트로 컷인 띠
+    private Image         _bannerDim;    // 큰 순간 화면 어둡게
+    private TMP_Text      _bannerSub;    // 영문 소제목(LAST CARD 등)
     private Image         _flash;
     private Coroutine     _bannerCo;
     private readonly Dictionary<int, Bubble> _bubbles = new Dictionary<int, Bubble>();
     private readonly Dictionary<string, float> _lastSpoke = new Dictionary<string, float>();
     private float _lastAnySpoke = -99f;
     private int _rotate;
+    private bool _greeted;       // 게임 시작 첫마디를 했는지
+    private bool _bankFetched;   // 서버 반응 대사를 한 번이라도 받았는지(또는 실패)
 
     private class Bubble
     {
@@ -99,12 +104,46 @@ public class HighlightDirector : MonoBehaviour
     {
         _detector = new SevensHighlightDetector(Mathf.Max(_mgr.PlayerCount, 4), _mgr.MaxPlaysPerTurn);
         _detector.Reset(_mgr.GetHandCounts());
+        if (!_greeted)
+        {
+            _greeted = true;
+            StartCoroutine(SayGameStart());
+        }
+    }
+
+    /// <summary>
+    /// 게임 시작 첫마디 — 세비-호가 홈(마이룸)에서 나눈 이야기를 짚는다.
+    /// 홈에서 '게임'을 누를 때 미리 요청한 대사(HomeSession)가 오면 그걸, 아니면 서버 묶음/기본 대사.
+    /// </summary>
+    private IEnumerator SayGameStart()
+    {
+        string name = HomeSession.MainCharacter;
+        int seat = -1;
+        for (int s = 1; s < Mathf.Max(_mgr.PlayerCount, 1); s++)
+            if (SeatName(s) == name) { seat = s; break; }
+        if (seat < 1) yield break;
+
+        float waited = 0f;
+        while ((HomeSession.GameStartPending || (useServerLines && ServerClient.Instance != null && !_bankFetched))
+               && waited < 6f)
+        {
+            waited += Time.unscaledDeltaTime;
+            yield return null;
+        }
+        yield return new WaitForSeconds(0.6f);
+
+        string line = HomeSession.ConsumeGameStartLine()
+                      ?? CharacterReactionLines.PickGameStart(name, HomeSession.TalkedRecently());
+        if (string.IsNullOrEmpty(line)) yield break;
+        _lastSpoke[name] = Time.time;
+        _lastAnySpoke = Time.time;
+        yield return SayAfter(seat, line, 0f);
     }
 
     private void OnTurnEnded(Player p, IReadOnlyList<Card> played)
     {
         if (_detector == null) OnGameStarted();
-        var events = _detector.OnTurnEnded(p.Index, played, _mgr.GetHandCounts());
+        var events = _detector.OnTurnEnded(p.Index, played, _mgr.GetHandCounts(), _mgr.GetHand(p.Index));
         if (events.Count == 0) return;
 
         foreach (var e in events) Debug.Log($"[Highlight] {e}");
@@ -122,6 +161,9 @@ public class HighlightDirector : MonoBehaviour
         }
         if (main.Intensity >= 2) React(main);
     }
+
+    /// <summary>이번 판 감지기(결과 화면 진행 그래프가 손패 기록·하이라이트를 읽는다). 시작 전이면 null.</summary>
+    public SevensHighlightDetector Detector => _detector;
 
     /// <summary>이번 판 하이라이트 요약(서버 결과 반응용). 예) ["플레이어 역전", "류 마지막 한 장"]</summary>
     public List<string> HighlightSummary() =>
@@ -189,7 +231,7 @@ public class HighlightDirector : MonoBehaviour
         var b = GetBubble(seat);
         if (b == null) yield break;
         PositionBubble(seat, b);
-        b.Text.text = line;
+        b.Text.text = line + $"<color=#{ColorUtility.ToHtmlStringRGB(RetroTheme.Gold)}> ▼</color>";
         if (b.Co != null) StopCoroutine(b.Co);
         b.Co = StartCoroutine(PopBubble(b));
         var prof = _mgr.GetProfile(seat);
@@ -210,7 +252,7 @@ public class HighlightDirector : MonoBehaviour
         {
             case HighlightType.LastCard:     text = who + "마지막 한 장!"; break;
             case HighlightType.Comeback:     text = e.Actor == 0 ? "역전!" : who + "역전!"; break;
-            case HighlightType.TripleCombo:  text = who + "3장 몰아치기!"; break;
+            case HighlightType.Blockade:     text = $"{e.Blocker} 쥐고 {SeatName(e.Other)} 봉쇄!"; break;
             case HighlightType.PassStreak:   text = who + (e.Count >= 4 ? "완전히 막혔다…" : "막혔다…"); break;
             case HighlightType.CloseRace:    text = "접전!"; break;
             case HighlightType.Reach:        text = who + $"{_mgr.GetHandCounts()[e.Actor]}장 남음"; break;
@@ -226,8 +268,43 @@ public class HighlightDirector : MonoBehaviour
         _bannerText.text = text;
         _bannerText.color = color;
         _bannerText.fontSize = size;
+        StyleBanner(e);
         if (_bannerCo != null) StopCoroutine(_bannerCo);
         _bannerCo = StartCoroutine(PlayBanner(e.Intensity));
+        HyperpopFX.Pulse(e.Intensity);   // 강도 2 이상: 가장자리 글리치 바·색종이(가운데는 비움)
+    }
+
+    /// <summary>레트로 컷인 모양: 강도 3 = 캐릭터 색 띠 + 화면 어둡게, 2 = 어두운 띠, 1 = 작은 띠.</summary>
+    private void StyleBanner(HighlightEvent e)
+    {
+        if (_bannerBand == null) return;
+        bool big = e.Intensity >= 3;
+        Color seat = e.Actor >= 0 ? RetroTheme.SeatColor(SeatName(e.Actor)) : RetroTheme.Gold;
+        _bannerDim.color = new Color(0.05f, 0.04f, 0.09f, big ? 0.6f : 0f);
+        _bannerBand.rectTransform.sizeDelta = new Vector2(2600f, big ? 190f : e.Intensity == 2 ? 124f : 84f);
+        _bannerBand.color = big ? seat : e.Intensity == 2 ? RetroTheme.PanelColor : RetroTheme.WithAlpha(RetroTheme.Inset, 0.94f);
+        _bannerText.fontSize = big ? 88f : e.Intensity == 2 ? 55f : 33f;
+        _bannerText.color = big ? RetroTheme.Ink : e.Intensity == 2 ? RetroTheme.Accent : RetroTheme.Text;
+        ((RectTransform)_bannerText.transform).anchoredPosition = new Vector2(0f, big ? -14f : e.Intensity == 2 ? -10f : 0f);
+        _bannerSub.gameObject.SetActive(e.Intensity >= 2);
+        _bannerSub.text = EnglishLabel(e.Type);
+        _bannerSub.color = big ? RetroTheme.Ink : RetroTheme.Muted;
+        ((RectTransform)_bannerSub.transform).anchoredPosition = new Vector2(0f, big ? 58f : 36f);
+    }
+
+    private static string EnglishLabel(HighlightType t)
+    {
+        switch (t)
+        {
+            case HighlightType.LastCard:     return "LAST CARD";
+            case HighlightType.Comeback:     return "COMEBACK";
+            case HighlightType.Blockade:     return "BLOCKADE";
+            case HighlightType.PassStreak:   return "STUCK";
+            case HighlightType.CloseRace:    return "CLOSE RACE";
+            case HighlightType.Reach:        return "REACH";
+            case HighlightType.LineComplete: return "LINE CLEAR";
+            default:                         return "HIGHLIGHT";
+        }
     }
 
     private IEnumerator PlayBanner(int intensity)
@@ -325,9 +402,7 @@ public class HighlightDirector : MonoBehaviour
         canvas.renderMode = RenderMode.ScreenSpaceOverlay;
         canvas.sortingOrder = 20;   // 카드게임 UI(10) 위, 결과 화면(30) 아래
         var scaler = canvasGO.AddComponent<CanvasScaler>();
-        scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-        scaler.referenceResolution = new Vector2(1920, 1080);
-        scaler.matchWidthOrHeight = 0.5f;
+        RetroCardGameSkin.SetupScaler(scaler);   // 카드게임 화면과 같은 1560×720 기준
         _canvasRT = (RectTransform)canvasGO.transform;
 
         // 화면 번쩍임
@@ -338,23 +413,39 @@ public class HighlightDirector : MonoBehaviour
         _flash.raycastTarget = false;
         Stretch((RectTransform)flashGO.transform);
 
-        // 배너(필드 위쪽 가운데)
-        var bannerGO = new GameObject("HighlightBanner");
+        // 컷인 배너: 화면 어둡게 + 기울어진 띠 + 제목/영문 소제목
+        var bannerGO = new GameObject("HighlightBanner", typeof(RectTransform));
         bannerGO.transform.SetParent(canvasGO.transform, false);
-        _bannerRT = bannerGO.AddComponent<RectTransform>();
-        _bannerRT.anchorMin = _bannerRT.anchorMax = new Vector2(0.5f, 0.5f);
-        _bannerRT.sizeDelta = new Vector2(1200f, 140f);
-        _bannerRT.anchoredPosition = new Vector2(0f, 120f);
+        Stretch((RectTransform)bannerGO.transform);
         _bannerGroup = bannerGO.AddComponent<CanvasGroup>();
         _bannerGroup.alpha = 0f;
         _bannerGroup.blocksRaycasts = false;
         _bannerGroup.interactable = false;
-        _bannerText = bannerGO.AddComponent<TextMeshProUGUI>();
-        _bannerText.alignment = TextAlignmentOptions.Center;
-        _bannerText.fontStyle = FontStyles.Bold;
-        _bannerText.raycastTarget = false;
-        _bannerText.outlineWidth = 0.18f;
-        _bannerText.outlineColor = new Color32(20, 16, 30, 255);
+
+        var dimRT = RetroTheme.Stretch(RetroTheme.Node("Dim", bannerGO.transform));
+        _bannerDim = dimRT.gameObject.AddComponent<Image>();
+        _bannerDim.color = new Color(0f, 0f, 0f, 0f);
+        _bannerDim.raycastTarget = false;
+
+        _bannerRT = RetroTheme.Place(RetroTheme.Node("Tilt", bannerGO.transform), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f),
+                                     new Vector2(0f, 60f), new Vector2(1400f, 200f));
+        _bannerRT.localRotation = Quaternion.Euler(0f, 0f, 5f);
+
+        var bandRT = RetroTheme.Place(RetroTheme.Node("Band", _bannerRT), new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f),
+                                      Vector2.zero, new Vector2(2600f, 190f));
+        _bannerBand = bandRT.gameObject.AddComponent<Image>();
+        _bannerBand.sprite = RetroTheme.PanelSprite(0, 6);
+        _bannerBand.type = Image.Type.Sliced;
+        _bannerBand.raycastTarget = false;
+
+        _bannerSub = RetroTheme.Label(_bannerRT, "Sub", "", 33f, RetroTheme.Ink, true);
+        RetroTheme.Place((RectTransform)_bannerSub.transform, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f),
+                         new Vector2(0f, 58f), new Vector2(1400f, 40f));
+        _bannerSub.characterSpacing = 30f;
+
+        _bannerText = RetroTheme.Label(_bannerRT, "Title", "", 88f, RetroTheme.Ink, true);
+        RetroTheme.Place((RectTransform)_bannerText.transform, new Vector2(0.5f, 0.5f), new Vector2(0.5f, 0.5f),
+                         Vector2.zero, new Vector2(1400f, 120f));
     }
 
     private Bubble GetBubble(int seat)
@@ -362,55 +453,46 @@ public class HighlightDirector : MonoBehaviour
         if (_bubbles.TryGetValue(seat, out var existing)) return existing;
         if (_mgr.GetProfile(seat) == null) return null;
 
-        var go = new GameObject($"Bubble_{seat}");
-        go.transform.SetParent(_canvasRT, false);
-        var rt = go.AddComponent<RectTransform>();
+        // 레트로 RPG 대화창: 검은 바탕 + 밝은 테두리 + 캐릭터 색 이름표 + ▼
+        var rt = RetroTheme.Node($"Bubble_{seat}", _canvasRT);
         rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
-        rt.sizeDelta = new Vector2(380f, 110f);
-        var bg = go.AddComponent<Image>();
-        bg.color = new Color(0.08f, 0.09f, 0.14f, 0.92f);
+        rt.sizeDelta = new Vector2(330f, 108f);
+        var bg = rt.gameObject.AddComponent<Image>();
+        bg.sprite = RetroTheme.PanelSprite(8, 0);
+        bg.type = Image.Type.Sliced;
+        bg.color = RetroTheme.Ink;
         bg.raycastTarget = false;
-        var outline = go.AddComponent<Outline>();
-        outline.effectColor = new Color(0.45f, 0.9f, 1f, 0.8f);
-        outline.effectDistance = new Vector2(2f, -2f);
-        var group = go.AddComponent<CanvasGroup>();
+        var sh = rt.gameObject.AddComponent<Shadow>();
+        sh.effectColor = new Color(0f, 0f, 0f, 0.5f);
+        sh.effectDistance = new Vector2(0f, -6f);
+        var ring = RetroTheme.Stretch(RetroTheme.Node("Border", rt));
+        var ri = ring.gameObject.AddComponent<Image>();
+        ri.sprite = RetroTheme.RingSprite(8, 4);
+        ri.type = Image.Type.Sliced;
+        ri.color = RetroTheme.Text;
+        ri.raycastTarget = false;
+
+        var group = rt.gameObject.AddComponent<CanvasGroup>();
         group.blocksRaycasts = false;
         group.interactable = false;
 
-        var nameGO = new GameObject("Name");
-        nameGO.transform.SetParent(go.transform, false);
-        var nameTMP = nameGO.AddComponent<TextMeshProUGUI>();
-        nameTMP.text = SeatName(seat);
-        nameTMP.fontSize = 20f;
-        nameTMP.fontStyle = FontStyles.Bold;
-        nameTMP.color = new Color(0.45f, 0.9f, 1f);
-        nameTMP.alignment = TextAlignmentOptions.TopLeft;
-        nameTMP.raycastTarget = false;
-        var nameRT = (RectTransform)nameGO.transform;
-        nameRT.anchorMin = new Vector2(0f, 1f);
-        nameRT.anchorMax = new Vector2(1f, 1f);
-        nameRT.pivot = new Vector2(0.5f, 1f);
-        nameRT.offsetMin = new Vector2(16f, -34f);
-        nameRT.offsetMax = new Vector2(-16f, -8f);
+        string name = SeatName(seat);
+        var chip = RetroTheme.Chip(rt, "Name", name, RetroTheme.SeatColor(name), RetroTheme.Ink, 22f, false);
+        RetroTheme.Place((RectTransform)chip.transform.parent, new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(12f, -10f), Vector2.zero);
 
-        var textGO = new GameObject("Line");
-        textGO.transform.SetParent(go.transform, false);
-        var tmp = textGO.AddComponent<TextMeshProUGUI>();
-        tmp.fontSize = 24f;
-        tmp.color = Color.white;
-        tmp.alignment = TextAlignmentOptions.Left;
+        var tmp = RetroTheme.Label(rt, "Line", "", 22f, RetroTheme.Text, false, TextAlignmentOptions.TopLeft);
         tmp.textWrappingMode = TextWrappingModes.Normal;
         tmp.enableAutoSizing = true;
         tmp.fontSizeMin = 16f;
-        tmp.fontSizeMax = 24f;
-        tmp.raycastTarget = false;
-        var textRT = (RectTransform)textGO.transform;
+        tmp.fontSizeMax = 22f;
+        tmp.richText = true;
+        var textRT = (RectTransform)tmp.transform;
         textRT.anchorMin = Vector2.zero;
         textRT.anchorMax = Vector2.one;
-        textRT.offsetMin = new Vector2(16f, 10f);
-        textRT.offsetMax = new Vector2(-16f, -36f);
+        textRT.offsetMin = new Vector2(14f, 10f);
+        textRT.offsetMax = new Vector2(-14f, -46f);
 
-        go.SetActive(false);
+        rt.gameObject.SetActive(false);
         var b = new Bubble { Root = rt, Group = group, Text = tmp };
         _bubbles[seat] = b;
         return b;
@@ -438,9 +520,10 @@ public class HighlightDirector : MonoBehaviour
         const float gap = 18f;
 
         Vector2 pos;
-        if (center.x > canvasHalfW * 0.5f)        pos = new Vector2(center.x - half.x - gap - bubbleHalf.x, center.y);   // 오른쪽 좌석
-        else if (center.x < -canvasHalfW * 0.5f)  pos = new Vector2(center.x + half.x + gap + bubbleHalf.x, center.y);   // 왼쪽 좌석
-        else                                      pos = new Vector2(center.x + half.x + gap + bubbleHalf.x, center.y);   // 위 좌석: 오른쪽 옆
+        // 레트로 배치: 필드를 가리지 않게 — 옆 좌석은 명패 아래, 위 좌석은 명패 왼쪽.
+        if (center.x > canvasHalfW * 0.5f)        pos = new Vector2(max.x - bubbleHalf.x, min.y - gap - bubbleHalf.y);   // 오른쪽 좌석
+        else if (center.x < -canvasHalfW * 0.5f)  pos = new Vector2(min.x + bubbleHalf.x, min.y - gap - bubbleHalf.y);   // 왼쪽 좌석
+        else                                      pos = new Vector2(min.x - gap - bubbleHalf.x, center.y);               // 위 좌석
         b.Root.anchoredPosition = pos;
     }
 
@@ -461,7 +544,7 @@ public class HighlightDirector : MonoBehaviour
 
     private IEnumerator FetchReactionBank()
     {
-        if (ServerClient.Instance == null) yield break;   // 서버 설정이 없으면 기본 대사만
+        if (ServerClient.Instance == null) { _bankFetched = true; yield break; }   // 서버 설정이 없으면 기본 대사만
         for (int attempt = 0; attempt < 4; attempt++)
         {
             using (var req = UnityWebRequest.Get($"{ServerClient.Instance.BaseUrl}/game/reaction_bank"))
@@ -471,6 +554,7 @@ public class HighlightDirector : MonoBehaviour
                 if (req.result != UnityWebRequest.Result.Success)
                 {
                     Debug.Log($"[HighlightDirector] 반응 대사 서버 연결 실패 — 기본 대사 사용 ({req.error})");
+                    _bankFetched = true;
                     yield break;
                 }
                 BankResponse data = null;
@@ -479,6 +563,7 @@ public class HighlightDirector : MonoBehaviour
                 if (data?.lines != null)
                     foreach (var l in data.lines) CharacterReactionLines.AddServerLine(l.character, l.key, l.line);
                 Debug.Log($"[HighlightDirector] 서버 반응 대사 {CharacterReactionLines.ServerLineCount}개");
+                _bankFetched = true;
                 // 서버가 아직 만드는 중인 캐릭터가 있으면 조금 뒤 다시 받아 온다.
                 if (data?.pending == null || data.pending.Length == 0) yield break;
             }
