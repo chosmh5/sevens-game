@@ -13,10 +13,22 @@ public class HyperpopFX : MonoBehaviour
     private const string PrefKey = "fx.reducedMotion";
     private const string ShaderPath = "Hyperpop/HyperpopTransition";
 
+    // 홈 배경 등이 매 프레임 확인하므로 PlayerPrefs(네이티브 호출)를 매번 읽지 않고 한 번 읽어 둔다.
+    private static int _reducedMotion = -1;   // -1 = 아직 안 읽음
+
     public static bool ReducedMotion
     {
-        get => PlayerPrefs.GetInt(PrefKey, 0) == 1;
-        set { PlayerPrefs.SetInt(PrefKey, value ? 1 : 0); PlayerPrefs.Save(); }
+        get
+        {
+            if (_reducedMotion < 0) _reducedMotion = PlayerPrefs.GetInt(PrefKey, 0) == 1 ? 1 : 0;
+            return _reducedMotion == 1;
+        }
+        set
+        {
+            _reducedMotion = value ? 1 : 0;
+            PlayerPrefs.SetInt(PrefKey, _reducedMotion);
+            PlayerPrefs.Save();
+        }
     }
 
     private static HyperpopFX _instance;

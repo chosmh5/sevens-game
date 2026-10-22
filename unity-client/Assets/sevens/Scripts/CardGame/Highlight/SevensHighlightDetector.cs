@@ -252,7 +252,7 @@ public sealed class SevensHighlightDetector
 
     /// <summary>
     /// 이번 판 하이라이트를 짧은 문구 목록으로 (서버의 게임 결과 반응 프롬프트용).
-    /// 예) ["플레이어 역전", "류 마지막 한 장", "플레이어가 카드를 아껴 진 봉쇄"]
+    /// 예) ["플레이어 역전", "류 마지막 한 장", "플레이어가 진 봉쇄"]
     /// </summary>
     public List<string> Summary(Func<int, string> nameOf, int max = 4)
     {
@@ -265,7 +265,7 @@ public sealed class SevensHighlightDetector
             if (e.Type == HighlightType.Reach || e.Type == HighlightType.LineComplete) continue;
             string who = e.Actor >= 0 ? nameOf(e.Actor) + " " : "";
             string text = e.Type == HighlightType.Blockade && e.Other >= 0
-                ? $"{nameOf(e.Actor)}가 카드를 아껴 {nameOf(e.Other)} 봉쇄"
+                ? $"{nameOf(e.Actor)}가 {nameOf(e.Other)} 봉쇄"
                 : who + Label(e.Type);
             if (seen.Add(text)) result.Add(text);
             if (result.Count >= max) break;

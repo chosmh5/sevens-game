@@ -25,6 +25,9 @@ public class HomeBackdropFX : MonoBehaviour
     private string _typing = "";
     private float _typed;
     private float _glitchUntil, _nextGlitch;
+    private int _shownChars = -1, _shownLinesVer = -1, _linesVer;   // 로그 글자를 실제로 바뀔 때만 다시 그린다
+    private bool _shownCursor;
+    private string _history = "";
 
     public static HomeBackdropFX Build(Transform bgCanvas, string characterName)
     {
@@ -69,6 +72,8 @@ public class HomeBackdropFX : MonoBehaviour
         _typing = "> " + line;
         _typed = 0f;
         while (_lines.Count > 3) _lines.RemoveAt(0);
+        _history = _lines.Count > 0 ? string.Join("\n", _lines) + "\n" : "";
+        _linesVer++;
     }
 
     /// <summary>배경만 0.2초 지지직(찌르기 등).</summary>
@@ -99,11 +104,16 @@ public class HomeBackdropFX : MonoBehaviour
             bar.uvRect = new Rect(Random.value, 0f, Random.Range(1f, 3f), 1f);
         }
 
-        // 로그 타이핑 + 커서
-        _typed += Time.unscaledDeltaTime * 30f;
+        // 로그 타이핑 + 커서. 글자 수·커서·줄이 바뀐 프레임에만 텍스트를 다시 만든다
+        // (예전엔 매 프레임 문자열을 새로 만들어 TMP 메시 재생성 + GC 가 계속 생겼다).
+        if (_typed < _typing.Length) _typed += Time.unscaledDeltaTime * 30f;
         int n = Mathf.Min(_typing.Length, Mathf.FloorToInt(_typed));
-        string cursor = (Mathf.FloorToInt(t * 2f) % 2 == 0) ? "_" : " ";
-        _log.text = (_lines.Count > 0 ? string.Join("\n", _lines) + "\n" : "") + _typing.Substring(0, n) + cursor;
+        bool cursorOn = Mathf.FloorToInt(t * 2f) % 2 == 0;
+        if (n == _shownChars && cursorOn == _shownCursor && _linesVer == _shownLinesVer) return;
+        _shownChars = n;
+        _shownCursor = cursorOn;
+        _shownLinesVer = _linesVer;
+        _log.text = _history + _typing.Substring(0, n) + (cursorOn ? "_" : " ");
     }
 
     private static Texture2D MakeRainbow()

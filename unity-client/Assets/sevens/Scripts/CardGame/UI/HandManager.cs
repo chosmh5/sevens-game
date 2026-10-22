@@ -48,6 +48,9 @@ public class HandManager : MonoBehaviour
     /// <summary>현재 손패 입력 허용 여부. 내 턴이 아닐 땐 false (GameManager가 제어).</summary>
     private bool _interactable = false;
 
+    /// <summary>턴당 최대 장수에 도달해 손패가 잠겼는지. 잠긴 동안엔 다른 곳에서 가용성을 다시 그려도 낼 수 없다.</summary>
+    private bool _locked = false;
+
     /// <summary>현재 손패(읽기 전용).</summary>
     public IReadOnlyList<Card> Hand => _hand;
 
@@ -93,14 +96,37 @@ public class HandManager : MonoBehaviour
     public void ReturnCard(Card card)
     {
         if (card == null) return;
-        _hand.Add(card);
-        _hand.Sort((a, b) =>
+        _locked = false;   // 한 장 되돌렸으니 다시 낼 수 있다
+
+        // 정렬 위치를 찾아 그 자리에 카드 한 장만 다시 꽂는다(예전엔 손패 UI 전체를 지우고 다시 만들었다).
+        int idx = 0;
+        while (idx < _hand.Count && CompareCards(_hand[idx], card) <= 0) idx++;
+        _hand.Insert(idx, card);
+
+        var ui = SpawnCardUI(card);
+        if (ui != null)
         {
-            int s = a.Suit.CompareTo(b.Suit);
-            return s != 0 ? s : a.Number.CompareTo(b.Number);
-        });
-        RebuildUI();
+            _cardUIs.Remove(ui);
+            _cardUIs.Insert(Mathf.Min(idx, _cardUIs.Count), ui);
+            ui.transform.SetSiblingIndex(SiblingIndexFor(idx));
+        }
+        fanLayout?.ApplyLayout();
         RefreshPlayableStates();
+    }
+
+    private static int CompareCards(Card a, Card b)
+    {
+        int s = a.Suit.CompareTo(b.Suit);
+        return s != 0 ? s : a.Number.CompareTo(b.Number);
+    }
+
+    /// <summary>손패 idx 번째 카드가 handArea 에서 몇 번째 자식이어야 하는지. 새 카드는 맨 끝에 생기므로
+    /// 바로 다음 카드의 자리로 옮기면 그 앞에 끼워진다(다음 카드가 없으면 맨 끝 그대로).</summary>
+    private int SiblingIndexFor(int idx)
+    {
+        if (idx + 1 < _cardUIs.Count && _cardUIs[idx + 1] != null)
+            return _cardUIs[idx + 1].transform.GetSiblingIndex();
+        return handArea != null ? handArea.childCount - 1 : 0;
     }
 
     /// <summary>손패 비우기.</summary>
@@ -108,12 +134,22 @@ public class HandManager : MonoBehaviour
     {
         _hand.Clear();
         for (int i = _cardUIs.Count - 1; i >= 0; i--)
-        {
-            if (_cardUIs[i] != null)
-                Destroy(_cardUIs[i].gameObject);
-        }
+            DestroyCardUI(_cardUIs[i]);
         _cardUIs.Clear();
         _selected = null;
+        _locked = false;
+    }
+
+    /// <summary>
+    /// 카드 UI 제거. Destroy 는 프레임 끝에 일어나서 그 사이 부채꼴 배치가 사라질 카드까지 세므로,
+    /// 먼저 비활성화해 배치에서 바로 빠지게 한다.
+    /// </summary>
+    private void DestroyCardUI(CardUI ui)
+    {
+        if (ui == null) return;
+        ui.OnClicked -= HandleCardClicked;
+        ui.gameObject.SetActive(false);
+        Destroy(ui.gameObject);
     }
 
     /// <summary>선택된 카드를 필드에 제출. 성공이면 true.</summary>
@@ -130,6 +166,7 @@ public class HandManager : MonoBehaviour
     public void SetInteractable(bool value)
     {
         _interactable = value;
+        _locked = false;   // 턴이 바뀌면 잠금도 풀린다
         if (!value && _selected != null)
         {
             _selected.SetSelected(false);
@@ -147,7 +184,7 @@ public class HandManager : MonoBehaviour
             var ui = _cardUIs[i];
             if (ui == null) continue;
             // 내 턴이 아니면 전부 비활성 표시(클릭도 차단됨).
-            bool playable = _interactable && fieldManager.CanPlace(ui.Card);
+            bool playable = _interactable && !_locked && fieldManager.CanPlace(ui.Card);
             ui.SetPlayable(playable);
         }
     }
@@ -158,6 +195,7 @@ public class HandManager : MonoBehaviour
     /// </summary>
     public void SetHandLocked(bool locked)
     {
+        _locked = locked;
         for (int i = 0; i < _cardUIs.Count; i++)
         {
             var ui = _cardUIs[i];
@@ -169,6 +207,7 @@ public class HandManager : MonoBehaviour
             _selected.SetSelected(false);
             _selected = null;
         }
+        if (!locked) RefreshPlayableStates();
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -178,9 +217,7 @@ public class HandManager : MonoBehaviour
     private void RebuildUI()
     {
         for (int i = _cardUIs.Count - 1; i >= 0; i--)
-        {
-            if (_cardUIs[i] != null) Destroy(_cardUIs[i].gameObject);
-        }
+            DestroyCardUI(_cardUIs[i]);
         _cardUIs.Clear();
         _selected = null;
 
@@ -204,6 +241,7 @@ public class HandManager : MonoBehaviour
 
         // 내 턴이 아니면 입력 무시 (상대 턴 중 카드 제출 버그 방지).
         if (!_interactable) return;
+        if (_locked) { ui.PlayShake(); return; }   // 이번 턴 최대 장수를 이미 냄
 
         // 같은 카드를 다시 클릭한 경우
         if (_selected == ui)
@@ -243,7 +281,7 @@ public class HandManager : MonoBehaviour
     private bool SubmitCard(CardUI ui)
     {
         if (ui == null || ui.Card == null) return false;
-        if (!_interactable) return false; // 내 턴이 아니면 제출 불가(방어)
+        if (!_interactable || _locked) return false; // 내 턴이 아니거나 잠겼으면 제출 불가(방어)
         if (fieldManager == null)
         {
             Debug.LogWarning("[HandManager] FieldManager가 연결되지 않았습니다.");
@@ -261,7 +299,7 @@ public class HandManager : MonoBehaviour
         _hand.Remove(card);
         _cardUIs.Remove(ui);
         if (_selected == ui) _selected = null;
-        Destroy(ui.gameObject);
+        DestroyCardUI(ui);
 
         fanLayout?.ApplyLayout();
         RefreshPlayableStates();

@@ -77,11 +77,15 @@ public class GameSceneManager : MonoBehaviour
     /// </summary>
     public void LoadScene(string sceneName)
     {
-        if (isTransitioning) return;
+        // 전환 코루틴이 예외로 중간에 끊기면 isTransitioning 이 계속 true 라 버튼이 전부 먹통이 된다 → 15초 넘으면 풀어 준다.
+        if (isTransitioning && Time.unscaledTime - _transitionStartedAt < 15f) return;
         // 로비는 없앴다 → 홈으로
         if (sceneName == Scenes.Lobby) sceneName = Scenes.Home;
+        _transitionStartedAt = Time.unscaledTime;
         StartCoroutine(TransitionTo(sceneName));
     }
+
+    private float _transitionStartedAt = -999f;
 
     /// <summary>홈(마이룸)으로</summary>
     public void GoToHome() => LoadScene(Scenes.Home);
@@ -116,11 +120,18 @@ public class GameSceneManager : MonoBehaviour
         if (sceneName == Scenes.Home && from == Scenes.CardGame)
             HomeSession.ReturnedFromGame = true;
 
-        // 씬 로드
-        AsyncOperation op = SceneManager.LoadSceneAsync(sceneName);
-        while (!op.isDone)
+        // 씬 로드. 빌드 설정에 없는 씬이면 op 가 null 이라 예전엔 여기서 멈춰 이후 모든 전환이 막혔다.
+        AsyncOperation op = Application.CanStreamedLevelBeLoaded(sceneName) ? SceneManager.LoadSceneAsync(sceneName) : null;
+        if (op == null)
         {
-            yield return null;
+            Debug.LogError($"[GameSceneManager] 씬 '{sceneName}' 을 불러올 수 없습니다(Build Settings 확인).");
+            HomeSession.ReturnedFromGame = false;
+            yield return StartCoroutine(RotateFor(from));
+        }
+        else
+        {
+            while (!op.isDone)
+                yield return null;
         }
 
         // 덮개 → 새 화면

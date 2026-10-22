@@ -252,10 +252,13 @@ public class HighlightDirector : MonoBehaviour
         {
             case HighlightType.LastCard:     text = who + "마지막 한 장!"; break;
             case HighlightType.Comeback:     text = e.Actor == 0 ? "역전!" : who + "역전!"; break;
-            case HighlightType.Blockade:     text = $"{e.Blocker} 쥐고 {SeatName(e.Other)} 봉쇄!"; break;
+            case HighlightType.Blockade:     text = $"{SeatName(e.Other)} 봉쇄!"; break;   // 어떤 카드로 막았는지는 숨긴다(패가 드러남)
             case HighlightType.PassStreak:   text = who + (e.Count >= 4 ? "완전히 막혔다…" : "막혔다…"); break;
             case HighlightType.CloseRace:    text = "접전!"; break;
-            case HighlightType.Reach:        text = who + $"{_mgr.GetHandCounts()[e.Actor]}장 남음"; break;
+            case HighlightType.Reach:
+                int[] counts = _mgr.GetHandCounts();
+                text = e.Actor >= 0 && e.Actor < counts.Length ? who + $"{counts[e.Actor]}장 남음" : "리치!";
+                break;
             case HighlightType.LineComplete: text = $"{e.Suit.ToSymbol()} 줄 완성"; break;
             default:                         text = SevensHighlightDetector.Label(e.Type); break;
         }

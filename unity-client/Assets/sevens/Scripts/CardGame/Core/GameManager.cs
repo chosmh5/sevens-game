@@ -72,6 +72,7 @@ public class CardGameManager : MonoBehaviour
     private readonly Stack<Card> _pendingPlays = new Stack<Card>(); // 이번 턴 사람이 낸 카드(취소용)
     private readonly List<Card>  _turnPlayed   = new List<Card>();  // 이번 턴에 확정적으로 낸 카드(턴 종료 이벤트용)
     private float _holdUntil;                                        // 이 시각까지 AI 제출을 잠깐 멈춤(연출용)
+    private Coroutine _aiTurnCo;                                     // 진행 중인 AI 턴(새 판 시작 시 멈춘다)
 
     public State CurrentState => _state;
     public Player CurrentPlayer => (_players != null && _currentIdx < _players.Length) ? _players[_currentIdx] : null;
@@ -182,6 +183,10 @@ public class CardGameManager : MonoBehaviour
             return;
         }
 
+        // 이전 판의 AI 턴이 아직 돌고 있으면(진행 중 '새 게임') 멈춘다 — 안 멈추면 두 판이 섞여 턴이 꼬인다.
+        if (_aiTurnCo != null) { StopCoroutine(_aiTurnCo); _aiTurnCo = null; }
+        if (_aiProfiles == null) _aiProfiles = new[] { rightProfile, topProfile, leftProfile };
+
         _state = State.Dealing;
 
         // 플레이어 생성
@@ -230,7 +235,7 @@ public class CardGameManager : MonoBehaviour
 
         _currentIdx = 0;
         _holdUntil = 0f;
-        GameStarted?.Invoke();
+        SafeInvoke(GameStarted);
         BeginTurn();
     }
 
@@ -249,14 +254,14 @@ public class CardGameManager : MonoBehaviour
         if (_currentIdx != 0 && (_currentIdx - 1) < _aiProfiles.Length)
             _aiProfiles[_currentIdx - 1]?.SetTurnActive(true);
 
-        TurnStarted?.Invoke(p);
+        SafeInvoke(TurnStarted, p);
 
         if (p.IsAI)
         {
             _state = State.AITurn;
             handManager.SetInteractable(false); // 상대 턴: 내 손패 입력 차단
             RefreshTurnButton();
-            StartCoroutine(RunAITurn(p));
+            _aiTurnCo = StartCoroutine(RunAITurn(p));
         }
         else
         {
@@ -274,12 +279,20 @@ public class CardGameManager : MonoBehaviour
     private void OnHumanCardPlayed(Card card)
     {
         if (_state != State.PlayerTurn) return;
+        if (_playsThisTurn >= maxPlaysPerTurn)
+        {
+            // 방어: 손패 잠금을 뚫고 한 장 더 들어온 경우 → 되돌려 규칙(턴당 최대 장수)을 지킨다.
+            if (fieldManager.UndoPlace(card)) handManager.ReturnCard(card);
+            handManager.SetHandLocked(true);
+            Debug.LogWarning($"[GameManager] 턴당 최대 {maxPlaysPerTurn}장 초과 제출 — 되돌림: {card}");
+            return;
+        }
 
         // HandManager가 이미 fieldManager.TryPlace 호출 + 자기 손에서 제거 완료.
         _playsThisTurn++;
         _pendingPlays.Push(card); // 취소 가능하도록 기록
         _turnPlayed.Add(card);
-        PlayerPlayedCard?.Invoke(_players[0], card);
+        SafeInvoke(PlayerPlayedCard, _players[0], card);
         Debug.Log($"[GameManager] {_players[0].Name} → {card} ({_playsThisTurn}/{maxPlaysPerTurn})");
 
         if (handManager.Hand.Count == 0)
@@ -322,7 +335,7 @@ public class CardGameManager : MonoBehaviour
                 return;
             }
             _players[0].PassCount++;
-            PlayerPassed?.Invoke(_players[0]);
+            SafeInvoke(PlayerPassed, _players[0]);
             Debug.Log($"[GameManager] {_players[0].Name} 패스");
         }
         else
@@ -445,7 +458,7 @@ public class CardGameManager : MonoBehaviour
             p.Hand.Remove(chosen);
             plays++;
             _turnPlayed.Add(chosen);
-            PlayerPlayedCard?.Invoke(p, chosen);
+            SafeInvoke(PlayerPlayedCard, p, chosen);
             Debug.Log($"[GameManager] {p.Name} → {chosen} ({plays}/{maxPlaysPerTurn})");
 
             // 카드 수 / 손패 가용성 즉시 갱신
@@ -455,6 +468,7 @@ public class CardGameManager : MonoBehaviour
 
             if (p.Hand.Count == 0)
             {
+                _aiTurnCo = null;
                 FinishGame(p);
                 yield break;
             }
@@ -465,11 +479,12 @@ public class CardGameManager : MonoBehaviour
         if (plays == 0) // 낼 카드가 정말 없었던 경우만 패스
         {
             p.PassCount++;
-            PlayerPassed?.Invoke(p);
+            SafeInvoke(PlayerPassed, p);
             Debug.Log($"[GameManager] {p.Name} 패스");
         }
 
         handManager.RefreshPlayableStates();
+        _aiTurnCo = null;
         NextTurn();
     }
 
@@ -527,7 +542,7 @@ public class CardGameManager : MonoBehaviour
         for (int i = 0; i < _aiProfiles.Length; i++)
             _aiProfiles[i]?.SetTurnActive(false);
         RefreshTurnButton(); // 버튼 비활성화
-        GameWon?.Invoke(winner);
+        SafeInvoke(GameWon, winner);
         Debug.Log($"[GameManager] 🏆 승자: {winner.Name}");
     }
 
@@ -552,6 +567,22 @@ public class CardGameManager : MonoBehaviour
             int j = _rng.Next(0, i + 1);
             (list[i], list[j]) = (list[j], list[i]);
         }
+    }
+
+    // 구독자(연출·HUD)가 예외를 내도 게임 진행(턴 넘기기·AI 코루틴)이 멈추지 않게 한다.
+    private static void SafeInvoke(Action a)
+    {
+        try { a?.Invoke(); } catch (Exception e) { Debug.LogException(e); }
+    }
+
+    private static void SafeInvoke<T>(Action<T> a, T arg)
+    {
+        try { a?.Invoke(arg); } catch (Exception e) { Debug.LogException(e); }
+    }
+
+    private static void SafeInvoke<T1, T2>(Action<T1, T2> a, T1 arg1, T2 arg2)
+    {
+        try { a?.Invoke(arg1, arg2); } catch (Exception e) { Debug.LogException(e); }
     }
 
     private string HandPreview(int idx)

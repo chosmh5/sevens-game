@@ -73,7 +73,8 @@ public class HomeController : MonoBehaviour
     };
     private static readonly string[] AfterBlockaded =
     {
-        "아까 그 카드, 일부러 쥐고 있던 거 다 알아요. 치사해요.",
+        "아까 저 꼼짝도 못 했잖아요. …다음 판엔 그렇게 안 둘 거예요.",
+        "그렇게 막히니까 좀 분하네요. 아주 조금요.",
         "저를 막고 좋았어요? 다음엔 제가 막을 거예요.",
     };
     private static readonly string[] PokeLines =
@@ -89,7 +90,13 @@ public class HomeController : MonoBehaviour
         "드디어 할 마음이 생겼네요.",
         "좋아요. 이번에도 제가 1등이에요.",
     };
-    private const string OfflineLine = "(서버랑 연결이 안 돼요. 오른쪽 위 '서버' 버튼에서 IP를 확인해 주세요.)";
+    // 서버는 연결됐지만 대사 생성(LLM)이 실패했을 때
+    private static readonly string[] ErrorLines =
+    {
+        "…잠깐 딴생각했어요. 다시 말해 줄래요?",
+        "어, 방금 못 들었어요. 한 번만 더요.",
+    };
+    private const string OfflineLine ="(서버랑 연결이 안 돼요. 오른쪽 위 '서버' 버튼에서 IP를 확인해 주세요.)";
 
     // ── 런타임 ─────────────────────────────────────────────────────
     private Camera _cam;
@@ -100,6 +107,9 @@ public class HomeController : MonoBehaviour
     private string _pendingPlayerMsg;  // 다음 대사 반응에 쓸 플레이어의 말
     private bool _waved;               // 이번 방문 인사 손짓
 
+    private RectTransform _safeRT;
+    private Rect _lastSafe;
+    private Vector2Int _lastScreen;
     private CanvasGroup _hudGroup;
     private TextMeshProUGUI _relationText;
     private TextMeshProUGUI _relationDelta;   // 명패 오른쪽에 잠깐 뜨는 +2 / -1
@@ -216,6 +226,14 @@ public class HomeController : MonoBehaviour
         // 캐릭터를 톡 치면 반응
         if (Input.GetMouseButtonDown(0) && !PointerOverUI() && IsOnCharacter(Input.mousePosition))
             Poke();
+
+        // 화면이 늦게 세로로 돌았거나 창 크기가 바뀌면 SafeArea 다시 맞춤(값이 바뀔 때만)
+        if (_safeRT != null && (Screen.safeArea != _lastSafe || Screen.width != _lastScreen.x || Screen.height != _lastScreen.y))
+        {
+            _lastSafe = Screen.safeArea;
+            _lastScreen = new Vector2Int(Screen.width, Screen.height);
+            ApplySafeArea(_safeRT);
+        }
 
         // 게임 버튼 숨쉬기
         if (_playBtnRT != null)
@@ -382,7 +400,10 @@ public class HomeController : MonoBehaviour
         canvasGO.AddComponent<GraphicRaycaster>();
 
         var safe = RetroTheme.Node("SafeArea", canvasGO.transform);
+        _safeRT = safe;
         ApplySafeArea(safe);
+        _lastSafe = Screen.safeArea;
+        _lastScreen = new Vector2Int(Screen.width, Screen.height);
 
         // 숨길 수 있는 HUD 묶음
         var hud = RetroTheme.Stretch(RetroTheme.Node("HUD", safe));
@@ -827,6 +848,13 @@ public class HomeController : MonoBehaviour
             {
                 _busy = false;
                 HomeSession.ServerOk = true;
+                // 서버는 LLM 오류를 "(응답 오류: …)" 같은 괄호 문장으로 돌려준다 → 오류 문구 대신 캐릭터다운 한마디.
+                if (!string.IsNullOrEmpty(reply) && reply.StartsWith("("))
+                {
+                    Debug.LogWarning($"[Home] 서버 대사 생성 실패: {reply}");
+                    Say(Pick(ErrorLines));
+                    return;
+                }
                 Say(string.IsNullOrWhiteSpace(reply) ? "……" : reply);
                 _replyCount++;
                 WatchRelation();   // 호감도 판정은 답장 뒤 서버에서 따로 돈다 → 바뀔 때까지 잠깐 지켜본다

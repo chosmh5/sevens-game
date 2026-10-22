@@ -92,6 +92,7 @@ public class GameResultReporter : MonoBehaviour
         for (int i = 0; i < counts.Length; i++) seats.Add(i);
         seats.Sort((a, b) =>
         {
+            if (a == b) return 0;   // 정렬이 자기 자신과 비교할 때 -1 을 주면 "일관성 없는 비교" 예외가 날 수 있다
             if (a == winner.Index) return -1;
             if (b == winner.Index) return 1;
             int c = counts[a].CompareTo(counts[b]);
@@ -110,9 +111,12 @@ public class GameResultReporter : MonoBehaviour
     {
         if (_overlayRoot == null) return;
         _overlayRoot.SetActive(true);
-        StopCoroutine("FadeOverlay");
-        StartCoroutine(FadeOverlay(show ? 1f : 0f, 0.4f));
+        // 문자열 StopCoroutine 은 IEnumerator 로 시작한 코루틴을 멈추지 못한다 → 핸들로 멈춘다.
+        if (_fadeCo != null) StopCoroutine(_fadeCo);
+        _fadeCo = StartCoroutine(FadeOverlay(show ? 1f : 0f, 0.4f));
     }
+
+    Coroutine _fadeCo;
 
     IEnumerator FadeOverlay(float target, float duration)
     {
@@ -120,12 +124,13 @@ public class GameResultReporter : MonoBehaviour
         float t = 0f;
         while (t < duration)
         {
-            t += Time.deltaTime;
+            t += Time.unscaledDeltaTime;
             _overlayGroup.alpha = Mathf.Lerp(start, target, t / duration);
             yield return null;
         }
         _overlayGroup.alpha = target;
         if (target == 0f) _overlayRoot.SetActive(false);
+        _fadeCo = null;
     }
 
     void BuildOverlay()
@@ -181,6 +186,7 @@ public class GameResultReporter : MonoBehaviour
         again.onClick.AddListener(() =>
         {
             StopAllCoroutines();
+            _fadeCo = null;
             _overlayGroup.alpha = 0f;
             _overlayRoot.SetActive(false);
             if (_mgr != null) _mgr.StartNewGame();
